@@ -8,7 +8,18 @@
 
 `wyh137815840/mp-animate` 现在只有一行 `README.md`，没有插件、没有测试、没有 `package.v2.json`。
 
-对照实现不在本仓库，而在同账号的 [mp-115](https://github.com/wyh137815840/mp-115)：「115 AV刮削」`plugins.v2/av115scraper`。它已经是 MoviePilot V2 插件：`_PluginBase`、Vuetify 表单、`CronTrigger`、`StorageChain` 列目录/改名、详情页、`POST /run` 与 `GET /status`、干跑默认开、`save_data("last_run")`。动漫插件照这个壳做，不照它的 JavBus/番号规则做。
+插件的外壳以 [jinyuhao-886/MoviePilot-Plugins](https://github.com/jinyuhao-886/MoviePilot-Plugins) 为准，不另起一套结构。该仓库是 MoviePilot V2 插件市场源：根上 `package.v2.json`（`package.json` 是空对象 `{}`），插件在 `plugins.v2/<类名小写>/`。市场里实际登记了两个插件：
+
+| 插件 | 目录 | 和本计划的关系 |
+| --- | --- | --- |
+| `P115StrgmSub`「115网盘订阅追更魔改版」1.7.4 | `plugins.v2/p115strgmsub/` | 外壳照它：类字段、`ui/config.py`、`handlers/`、`get_service`、`VCronField`、`onlyonce`、`save_data('history')`。115 调用不照它 |
+| `Doc911Subscribe`「911文档订阅添加」 | `plugins.v2/doc911subscribe/__init__.py` | 单文件每日任务。它的解析在「本月更新【动漫】」处停，不追番 |
+
+`libraryscraper_enhanced/` 在目录里，但没有写进 `package.v2.json`，市场不会出现。Anime115 必须进索引。
+
+这个仓库里**没有** dmhy、磁力离线、整包摊平。`P115StrgmSub` 的追更是：读 MoviePilot 订阅，用 PanSou / HDHive / TG 找 **115 分享链接**，再用自己的 cookie 建 `P115Client` 去转存。表单里有「115 Cookie」。另有 `wheels/` 里的 `p115client` 和 405 补丁。这些都不进 Anime115。
+
+同账号的 [mp-115](https://github.com/wyh137815840/mp-115)「115 AV刮削」只作 Emby/strm 的旁证，不再当外壳。
 
 Grok Bot 的连载补磁力和整包摊平**源码不在本仓库，也不在 bot 记忆里**。能对上的只有：
 
@@ -23,69 +34,95 @@ Grok Bot 的连载补磁力和整包摊平**源码不在本仓库，也不在 bo
 2. **离线完成后的 Emby 友好布局。** 完成的任务从日期收件箱整理进动漫库路径。认不准的留在收件箱。
 3. **大约每 2 小时的「动漫整包摊平」。** 先干跑。只有存在 `ok_eligible_non_collision` 的移动才落盘。碰撞和认不准的重命名一律不动。干跑结果全是碰撞/不确定时，整次什么都不做。
 
+## 照抄什么，改掉什么
+
+照抄 `P115StrgmSub` 的外壳：
+
+- 仓库能被 MoviePilot「插件源」直接添加。索引键是类名，带 `release: true`、`labels`、`level`、`history`。图标用官方仓库上的完整 URL，不用本地 png 名。不写 `system_version`（对方索引也没写）。README 写明只给 V2，因为调用的是 V2 的 `U115Pan`。
+- 类字段与对方一致：`plugin_name`、`plugin_desc`、`plugin_icon`、`plugin_version`（与索引相同）、`plugin_author`、`author_url`、`plugin_config_prefix`、`plugin_order = 20`、`auth_level = 1`。
+- 表单放在 `ui/config.py` 的 `UIConfig.get_form` / `get_page`。组件用 `VForm`、`VRow`、`VCol`、`VSwitch`、`VCronField`、`VAlert`、`VExpansionPanels`、`VTextarea`。顶栏是「启用 / 发送通知 / 立即运行 / 执行周期」。
+- 周期任务只通过 `get_service` 注册。`CronTrigger.from_crontab`。表达式先用 `settings.TZ` 校验，不合法就打日志并回退该任务的默认式，不让整个插件起不来。
+- 「立即运行」照对方：`onlyonce` 时用 `BackgroundScheduler(timezone=settings.TZ)` 加一个 3 秒后的 `date` 任务，然后把开关写回 false。周期任务不用私有调度器（`Doc911Subscribe` 那种自建 `BackgroundScheduler` 不抄）。
+- 详情页读 `get_data('history')`。每次运行往列表头插一条摘要，最多留 50 条。通知用 `post_message(mtype=NotificationType.Plugin)`，并且只在「发送通知」打开时发。
+- 长循环里看 `global_vars.is_system_stopped`，系统停止就跳出。
+- 业务放 `handlers/`，115 访问放 `clients/` 里的一个类。解析和分类函数不 import `app`，单测只打这些函数。
+
+改掉，不从那个仓库带过来：
+
+- 不建 `P115Client`，不放 `wheels/`、`requirements.txt`、`patches/`，表单里没有「115 Cookie」。
+- 不转存 115 分享链接。每日任务提交的是 dmhy 磁力。
+- 不接 PanSou、HDHive、Nullbr、TG，不改 MoviePilot 的订阅站点、规则组和洗版评分。
+- 追更名单第一版用表单里的多行文本，不扫 `SubscribeOper.list()`。对方的追更对象是 MP 订阅；我们的搜索词、别名和字幕组它的订阅行里没有。是否改成读订阅，见决定项 14。
+- 对方只有一个 cron，空了也会用 `0 18-23 * * *` 顶上。我们三个任务各一个 `VCronField`。某一栏留空就**不注册**那一个服务，避免摊平或整理被默认式打开。
+- `dry_run` 和 `flatten_apply` 是我们多出来的开关，放在顶栏。对方没有干跑。
+
 ## 插件身份与仓库布局（批准后才建）
 
-MoviePilot 从本仓库根目录拉 V2 插件，布局与 mp-115 相同：
-
 ```text
-package.v2.json
+package.v2.json                 # 只登记 Anime115
+package.json                    # {}
+README.md
 plugins.v2/anime115/
-    __init__.py            # 类 Anime115
-    anime_dmhy.py          # 搜索、打分、集数
-    anime_offline.py       # 用已登录的 U115Pan 提交离线并轮询
-    anime_organize.py      # 完成后的库内移动
-    anime_flatten.py       # 整包摊平与安全门
-    anime_names.py         # 标题归一、季/集、Windows 非法字符
+    __init__.py                 # 类 Anime115：配置、服务、立即运行、历史
+    ui/config.py                # UIConfig.get_form / get_page
+    clients/u115.py             # U115Session，只包已登录的 U115Pan / StorageChain
+    handlers/dmhy.py            # 搜索、打分、集数
+    handlers/offline.py         # 提交与轮询
+    handlers/organize.py        # 完成后的库内移动
+    handlers/flatten.py         # 整包摊平与安全门
+    utils/names.py              # 标题归一、季/集、Windows 非法字符
 tests/
     test_dmhy_score.py
     test_flatten_gate.py
 ```
 
-索引条目草案：
+索引条目：
 
 | 字段 | 值 |
 | --- | --- |
-| 插件 ID / 类名 | `Anime115` |
+| 键 / 类名 | `Anime115` |
 | 目录 | `plugins.v2/anime115` |
-| 显示名 | 动漫 115 |
-| `plugin_version` | `1.0.0`，与索引 `version` 一致 |
-| `plugin_config_prefix` | `anime115_` |
-| `system_version` | `>=2.0.0,<3`（与 115 AV刮削相同，锁在当前这台 V2） |
-| `labels` | 动漫 |
-| 渲染 | 默认 Vuetify JSON，不做 Vue 联邦 |
+| `name` | 动漫 115 |
+| `description` | 从动漫花园补连载磁力，用 MoviePilot 已登录的 115 离线，并做整包摊平 |
+| `labels` | `动漫,115网盘` |
+| `version` | `1.0.0`，与 `plugin_version` 相同 |
+| `release` | `true` |
+| `icon` | `https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png` |
+| `author` | `wyh137815840` |
+| `level` | `1` |
+| `history` | `v1.0.0` 一行说明 |
 
-不建 V3 副本。这台宿主是 V2；官方已经把 V2 标成历史版本，但换宿主不在这次范围里。
+类上再写 `author_url = "https://github.com/wyh137815840"`、`plugin_config_prefix = "anime115_"`。不建 V3 目录。
 
 ## 模块边界
 
-业务函数不碰 MoviePilot。`__init__.py` 只做配置、锁、调度、通知和把结果写成 `save_data`。四个业务模块用普通函数和 dataclass，单测不导入 `app.*`。
+`__init__.py` 只做配置、锁、`get_service`、立即运行、通知和 `history`。handlers 接收一个 `U115Session`。测试用假会话，方法为：`check_login`、`ensure_dir`、`list_dir`、`move`、`delete`、`add_offline`、`list_offline`、`quota`。
 
 | 模块 | 输入 | 输出 | 不做的事 |
 | --- | --- | --- | --- |
-| `anime_dmhy` | 追更列表、RSS/HTML | 候选磁力：标题、发布时间、体积、infohash、集数、分数、丢弃原因 | 不访问 115 |
-| `anime_offline` | 选中的磁力、当天目录 | 提交记录、任务状态 | 不改库目录 |
-| `anime_organize` | 已完成任务、库根 | 移动计划：`move` / `leave`，带原因 | 不提交磁力，不摊平别的目录 |
-| `anime_flatten` | 扫描根、目录树 | 每条提案一个分类 | 不提交磁力，不按 TMDB 改名 |
-| `anime_names` | 原始标题、文件名 | 归一标题、季、集、安全文件名 | 不发网络请求 |
-
-115 访问收成一个小接口，测试里用假实现：`logged_in`、`ensure_dir`、`list_dir`、`move`、`add_offline`、`list_offline`、`quota`。生产实现只调用 MoviePilot 已经登录的 `U115Pan` / `StorageChain`，见下文「115 会话」。禁止在这个接口后面接 `P115Client`、cookie 文件或 CloudDrive2。
+| `handlers/dmhy.py` | 追更列表、RSS/HTML | 候选磁力：标题、发布时间、体积、infohash、集数、分数、丢弃原因 | 不访问 115 |
+| `handlers/offline.py` | 选中的磁力、当天目录 | 提交记录、任务状态 | 不改库目录 |
+| `handlers/organize.py` | 已完成任务、库根 | 移动计划：`move` / `leave`，带原因 | 不提交磁力，不摊平别的目录 |
+| `handlers/flatten.py` | 扫描根、目录树 | 每条提案一个分类 | 不提交磁力，不按 TMDB 改名 |
+| `utils/names.py` | 原始标题、文件名 | 归一标题、季、集、安全文件名 | 不发网络请求 |
+| `clients/u115.py` | 上面的方法调用 | 转成 `StorageChain` / `U115Pan` | 不创建 `P115Client`，不读 cookie |
 
 ## 对应到 MoviePilot V2 的哪些钩子
 
-基类是 `app.plugins._PluginBase`，写法对齐 `Av115Scraper`。
+基类是 `app.plugins._PluginBase`，注册方式和 `P115StrgmSub.get_service` 相同。
 
 | 钩子 | 用法 |
 | --- | --- |
-| `init_plugin` | 读配置。`onlyonce` 为真时改回 false、`update_config`，再起后台线程跑所选任务。 |
-| `get_state` | 插件启用即为真。定时任务是否注册还要看对应 cron 是否填写。 |
-| `get_form` | Vuetify：开关、cron、路径、追更列表、存储 ID。没有 cookie、没有第二种登录。 |
+| `init_plugin` | 读配置，校验三个 cron。`onlyonce` 为真时用 `BackgroundScheduler` 约 3 秒后跑所选任务，然后写回 false。 |
+| `get_state` | 返回 `_enabled`。某个 cron 为空只是不注册那一个服务，不把整个插件算成关闭。 |
+| `get_form` | 交给 `UIConfig.get_form`。顶栏：启用、发送通知、只预览、摊平允许落盘、立即运行，外加三个 `VCronField`。没有 cookie 输入框。 |
 | `get_page` | 最近三次任务的摘要：提交了几条、留下几条、摊平提案各类多少、实际移动多少。 |
-| `get_service` | 三个服务，见下节。插件关闭或 cron 为空则不注册。cron 解析失败只打 warning。 |
-| `get_api` | `POST /run`（body：`job=daily\|organize\|flatten`，`apply=false`）、`GET /status`。给外部或手动调用，`auth=apikey`。 |
+| `get_service` | `_enabled` 为假时返回 `[]`。否则按三个 cron 各追加一条 `{id, name, trigger, func, kwargs}`。某一栏为空或校验失败则跳过该条，不套用对方那个「空了就用 18–23 点」的回退。 |
+| `get_api` | 与对方一样不写 `auth`（宿主默认 apikey）：`GET /run?job=daily\|organize\|flatten`，`GET /status`。`job` 缺省时跑每日补磁力。 |
 | `get_command` | 第一版不做。需要时再加 `/anime115_daily` 之类，走 `EventType.PluginAction`。 |
 | `stop_service` | 置取消事件。正在跑的循环在下一轮停。 |
 | `post_message` | 有提交、有整理、115 未登录、离线接口失败、配额用尽时通知。干跑零结果不通知，避免每两小时刷屏。 |
-| `save_data` | `seen`（infohash 与「剧+季+集」）、`tasks`（离线任务）、`last_daily`、`last_organize`、`last_flatten`。 |
+| `save_data` | `history`（详情页，最多 50 条）、`seen`（infohash 与「剧+季+集」）、`tasks`（离线任务）。 |
 | 锁 | 一把 `threading.Lock`。补磁力、整理、摊平互斥。第二次进来直接记「已有任务」。 |
 
 详情页和接口都只返回截断后的结果（AV 插件是 200 条）。完整干跑文本写到插件数据目录的 `flatten-last.txt`，不进配置库。
@@ -140,7 +177,7 @@ Emby 刷新若开启，照 AV 插件：`ModuleManager` 里找 `EmbyModule`，按
 
 ## 时间表
 
-三个 `get_service` 条目，`id` 固定为 `Anime115.Daily`、`Anime115.Organize`、`Anime115.Flatten`。触发器是 `CronTrigger.from_crontab`。
+三个 `get_service` 条目，`id` 固定为 `Anime115`、`Anime115.Organize`、`Anime115.Flatten`（主任务的 id 用类名，与 `P115StrgmSub` 的 `"id": "P115StrgmSub"` 相同）。触发器是 `CronTrigger.from_crontab`。校验时带 `pytz.timezone(settings.TZ)`。
 
 | 任务 | 建议 cron | 做什么 |
 | --- | --- | --- |
@@ -148,7 +185,7 @@ Emby 刷新若开启，照 AV 插件：`ModuleManager` 里找 `EmbyModule`，按
 | 整理 | `*/30 * * * *` | 只处理本插件提交过的任务；下完了就尝试入库 |
 | 摊平 | `15 */2 * * *` | 干跑分类；满足安全门才移动 |
 
-`15` 分是为了避开整点上的其它定时任务。宿主机若不是中国时区，每日 cron 要改，不在代码里写死 `Asia/Shanghai`。插件不参与 cookie keepalive。
+`15` 分是为了避开整点上的其它定时任务。时区用 MoviePilot 的 `settings.TZ`，不在代码里写死 `Asia/Shanghai`（`Doc911Subscribe` 写死了上海，那一处不抄）。插件不参与 cookie keepalive。
 
 手动口与定时走同一函数。`dry_run` 或接口 `apply=false` 时只记结果。
 
@@ -301,7 +338,7 @@ Bot 例行任务的关闭不在本仓库里做。计划批准并插件干跑通�
 
 每一步都能单独停，且默认干跑。
 
-1. 插件壳、表单、三个空任务、状态页。不接网。
+1. 按对方仓库的索引和目录把壳搭起来：`package.v2.json`、`ui/config.py`、三个 `get_service` 空任务、`history` 详情页。不接网。
 2. dmhy 解析和打分，加单测。每日任务只打印将要提交的磁力。
 3. 用已登录的 `U115Pan` 建当天目录、提交离线、轮询。不引入第二套登录。干跑仍跳过提交。
 4. 整理：只移动确定项。
@@ -324,7 +361,7 @@ Bot 例行任务的关闭不在本仓库里做。计划批准并插件干跑通�
 - **115 风控。** 间隔、单次上限。`U115Pan` 自己的 429 冷却触发后，本轮停止。
 - **和 bot 双开。** 迁移动作里写明先停 bot。
 - **strm 盖住已有 mkv，或 strm 写了 `127.0.0.1`。** 第一版不做 strm；以后做也跳过已有 mkv，并且用 `192.168.1.10`。
-- **V2 宿主以后升级到 V3 插件装不上。** `system_version` 标死 `<3`。不在这次做 V3。
+- **换到 V3 宿主时这个插件对不上 `U115Pan`。** 索引照对方，不写 `system_version`。README 写明只在 V2 上用。不在这次做 V3。
 - **配置进了 git。** 插件配置里没有 cookie，也没有 token。登录只留在 MoviePilot 自己的存储配置里。
 
 ## 这次明确不做
@@ -333,7 +370,8 @@ Bot 例行任务的关闭不在本仓库里做。计划批准并插件干跑通�
 - 不做 JavBus、番号、AV 库。
 - 不自动发现新番（没有追更列表就不搜）。
 - 不按 TMDB/TVDB 刮 nfo。那是 Emby 或以后的开关。
-- 不引入 `P115Client`、cookie 文件、Open 模式开关，也不在插件里扫码或刷新 token。登录完全沿用 MoviePilot 已有的 `U115Pan`。
+- 不引入 `P115Client`、cookie 文件、`wheels/`、405 补丁或 Open 模式开关，也不在插件里扫码或刷新 token。登录完全沿用 MoviePilot 已有的 `U115Pan`。
+- 不转存 115 分享链接，不接管 MoviePilot 订阅站点和规则组。
 - 不改 bot 进程。本计划只规定何时可以停它。
 
 ## 需要你拍板的项
@@ -347,11 +385,14 @@ Bot 例行任务的关闭不在本仓库里做。计划批准并插件干跑通�
 5. **第一版要不要写 strm？** 建议不要。Emby 路径 `F:\动漫` 和 Unraid 上的库路径还没对上，且库里已经有 mkv。只做 115 目录整理。
 6. **摊平扫描根**有哪些？建议先只扫收件箱 `/离线下载/动漫`，不要扫整个库，直到干跑稳定。确认「摊平 = 去掉重复包装目录、不改文件名」。
 7. **安全门粒度**：建议全局只要有至少一条 `ok_eligible_non_collision` 就只执行那些安全条；碰撞/不确定跳过。备选是「同一目录里出现任何不确定，则该目录一条都不动」。
-8. **已按更正关掉。** 不读 cookie 文件，不强制用户号 `101481377`。还要确认的只是：MoviePilot 里这个 115 的存储 ID 是不是 `u115`。建议是。
+8. **已按更正关掉。** 不读 cookie 文件，不强制用户号 `101481377`。还要确认的只是：MoviePilot 里这个 115 的存储 ID 是不是 `u115`。建议是。对方插件用的是表单里的 cookie，那一栏不抄。
 9. **每日时刻和时区。** 建议宿主机本地 `15 10 * * *`。若 Windows 不是中国时区，请给出要换成的 cron。
 10. **整理之后刷不刷 Emby「动漫」库？** 建议第一版不刷。strm 没写之前，115 上的移动 Emby 不一定看得见。
 11. **bot 何时停？** 建议插件每日干跑对上一天之后立刻停 bot 的补磁力和摊平，再把插件 `dry_run` 关掉。不要并行写 115。
 12. **分辨率和合集。** 建议只收 1080、要字幕、不收合集、回溯 36 小时、单集 80MB–8GB。
 13. **已按更正关掉。** 插件使用 MoviePilot 当前的 115 登录，不准备第二套 Open 或 cookie 登录。
+14. **追更名单从哪来？** 建议仍用表单多行文本。对方是扫 MoviePilot 订阅再转存分享链接；订阅行里没有 dmhy 搜索词和字幕组。若要改成「只处理类型为电视剧、分类含动漫的 MP 订阅」，请明确说。
+15. **作者和图标。** 建议 `author` 用 `wyh137815840`，图标用对方同款官方 `cloud.png` URL。要换图标再说。
+16. **空 cron 怎么办？** 建议该任务不注册。对方会在 cron 为空时改跑 `0 18-23 * * *`，那个回退不抄。
 
-批准之后的实现 PR 只做第 1–5 步里你点名的范围，并继续让 `dry_run` 和 `flatten_apply` 默认关闭。
+批准之后的实现 PR 只做第 1–5 步里你点名的范围，并继续让 `dry_run` 和 `flatten_apply` 默认关闭。目录按上面的 `ui/`、`handlers/`、`clients/` 来，不按之前的平铺文件名。
