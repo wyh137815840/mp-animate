@@ -12,14 +12,14 @@
 
 Grok Bot 的连载补磁力和整包摊平**源码不在本仓库，也不在 bot 记忆里**。能对上的只有：
 
-- 日记一行（2026-10-21）：连载番每日补磁力走 **p115**，例：「冷淡的佐藤同学只对我撒娇」E03 离线并整理；另外两部当天没有新资源。
-- 记忆：主号 `101481377`；CD2 挂载前缀 `/115open/`（另一挂载 `4414522` 不能用）；cookie 文件由 keepalive 同步到 Windows 的 `115-cookies.txt`；Emby 动漫库名「动漫」、条目 3、路径 `F:\动漫`、类型 tvshows；strm 用 `http://127.0.0.1:8787/redirect?pickcode=`。AV 插件后来的结论更严：Unraid 上的 Emby 不能用 `127.0.0.1`，播放地址应是 `http://192.168.1.10:8787/redirect?pickcode={pickcode}`，刷新走 MoviePilot 里已存的 Emby，不写死 IP。
+- 日记一行（2026-10-21）：连载番每日补磁力曾走 p115，例：「冷淡的佐藤同学只对我撒娇」E03 离线并整理；另外两部当天没有新资源。插件不再走那条客户端。
+- 记忆里还有主号、CD2 前缀 `/115open/`、以及 keepalive 同步的 `115-cookies.txt`。这些只说明旧 bot 怎么登录。插件不读 cookie、不核对用户号，只用 MoviePilot 里已经登录的 115。Emby 动漫库名「动漫」、条目 3、路径 `F:\动漫`、类型 tvshows。AV 插件的播放地址结论仍然有效：Unraid 上的 Emby 不能用 `127.0.0.1`，应是 `http://192.168.1.10:8787/redirect?pickcode={pickcode}`，刷新走 MoviePilot 里已存的 Emby。
 
 所以下面的搜索词表、字幕组偏好、摊平分类器细节是**按结果反推的默认规则**，不是从旧脚本逐行搬来的。实现时不要假装恢复了一份不存在的 bot 源码。
 
 ## 要替换的三件事
 
-1. **每天连载补磁力。** 从动漫花园拿连载磁力，提交到 115 离线，落到 `/115open/离线下载/动漫/YYYYMMDD`。115 调用走 p115client 的 cookie 或 open，不走 CloudDrive2。CD2 会被 405 / WAF 挡住。
+1. **每天连载补磁力。** 从动漫花园拿连载磁力，用 MoviePilot 已登录的 115 会话提交离线，落到 `/离线下载/动漫/YYYYMMDD`（口头上的 `/115open/...` 只是旧 CD2 前缀）。不另建客户端，不走 CloudDrive2。
 2. **离线完成后的 Emby 友好布局。** 完成的任务从日期收件箱整理进动漫库路径。认不准的留在收件箱。
 3. **大约每 2 小时的「动漫整包摊平」。** 先干跑。只有存在 `ok_eligible_non_collision` 的移动才落盘。碰撞和认不准的重命名一律不动。干跑结果全是碰撞/不确定时，整次什么都不做。
 
@@ -32,11 +32,10 @@ package.v2.json
 plugins.v2/anime115/
     __init__.py            # 类 Anime115
     anime_dmhy.py          # 搜索、打分、集数
-    anime_offline.py       # p115 离线提交与轮询
+    anime_offline.py       # 用已登录的 U115Pan 提交离线并轮询
     anime_organize.py      # 完成后的库内移动
     anime_flatten.py       # 整包摊平与安全门
     anime_names.py         # 标题归一、季/集、Windows 非法字符
-    requirements.txt       # p115client，实现时再钉版本
 tests/
     test_dmhy_score.py
     test_flatten_gate.py
@@ -69,7 +68,7 @@ tests/
 | `anime_flatten` | 扫描根、目录树 | 每条提案一个分类 | 不提交磁力，不按 TMDB 改名 |
 | `anime_names` | 原始标题、文件名 | 归一标题、季、集、安全文件名 | 不发网络请求 |
 
-115 访问收成一个小接口，测试里用假实现：`whoami`、`mkdir`、`list_dir`、`move`、`add_offline`、`list_offline`、`quota`。生产实现是 `P115Client`。禁止在这个接口后面接 CloudDrive2。
+115 访问收成一个小接口，测试里用假实现：`logged_in`、`ensure_dir`、`list_dir`、`move`、`add_offline`、`list_offline`、`quota`。生产实现只调用 MoviePilot 已经登录的 `U115Pan` / `StorageChain`，见下文「115 会话」。禁止在这个接口后面接 `P115Client`、cookie 文件或 CloudDrive2。
 
 ## 对应到 MoviePilot V2 的哪些钩子
 
@@ -79,13 +78,13 @@ tests/
 | --- | --- |
 | `init_plugin` | 读配置。`onlyonce` 为真时改回 false、`update_config`，再起后台线程跑所选任务。 |
 | `get_state` | 插件启用即为真。定时任务是否注册还要看对应 cron 是否填写。 |
-| `get_form` | Vuetify：开关、cron、路径、追更列表、cookie 文件路径。cookie 本身不要出现在日志和详情页。 |
+| `get_form` | Vuetify：开关、cron、路径、追更列表、存储 ID。没有 cookie、没有第二种登录。 |
 | `get_page` | 最近三次任务的摘要：提交了几条、留下几条、摊平提案各类多少、实际移动多少。 |
 | `get_service` | 三个服务，见下节。插件关闭或 cron 为空则不注册。cron 解析失败只打 warning。 |
 | `get_api` | `POST /run`（body：`job=daily\|organize\|flatten`，`apply=false`）、`GET /status`。给外部或手动调用，`auth=apikey`。 |
 | `get_command` | 第一版不做。需要时再加 `/anime115_daily` 之类，走 `EventType.PluginAction`。 |
 | `stop_service` | 置取消事件。正在跑的循环在下一轮停。 |
-| `post_message` | 有提交、有整理、cookie 失效、账号不对、配额用尽时通知。干跑零结果不通知，避免每两小时刷屏。 |
+| `post_message` | 有提交、有整理、115 未登录、离线接口失败、配额用尽时通知。干跑零结果不通知，避免每两小时刷屏。 |
 | `save_data` | `seen`（infohash 与「剧+季+集」）、`tasks`（离线任务）、`last_daily`、`last_organize`、`last_flatten`。 |
 | 锁 | 一把 `threading.Lock`。补磁力、整理、摊平互斥。第二次进来直接记「已有任务」。 |
 
@@ -102,10 +101,7 @@ Emby 刷新若开启，照 AV 插件：`ModuleManager` 里找 `EmbyModule`，按
 | `enabled` | 关 | 总开关 |
 | `onlyonce` | 关 | 保存后跑一次，随即写回关 |
 | `dry_run` | **开** | 总干跑。开着时三个任务都不提交磁力、不移动文件 |
-| `storage` | `u115` | 仅作账号提示/日志。写操作不走 StorageChain，见认证一节 |
-| `expected_user_id` | `101481377` | `whoami` 不一致就整次拒绝 |
-| `cookie_file` | 空，待你填 | 网页 cookie 文件。不把 cookie 粘进表单 |
-| `p115_mode` | `web` | `web` 用 cookie；`open` 用单独的 open token 文件。默认 web，因为离线添加在 open 上经常不完整 |
+| `storage` | `u115` | MoviePilot 里已经登录的 115 存储 ID。`U115Pan.check()` 失败就整次停止 |
 | `daily_cron` | `15 10 * * *` | 每天补磁力。cron 用 MoviePilot 宿主机时区 |
 | `organize_cron` | `*/30 * * * *` | 看离线是否下完并整理 |
 | `flatten_cron` | `15 */2 * * *` | 整包摊平，错开整点 |
@@ -152,34 +148,38 @@ Emby 刷新若开启，照 AV 插件：`ModuleManager` 里找 `EmbyModule`，按
 | 整理 | `*/30 * * * *` | 只处理本插件提交过的任务；下完了就尝试入库 |
 | 摊平 | `15 */2 * * *` | 干跑分类；满足安全门才移动 |
 
-`15` 分是为了避开整点别的定时任务，也避开记忆里 09:00 / 15:00 / 21:00 的 cookie keepalive 整点。宿主机若不是中国时区，每日 cron 要改，不在代码里写死 `Asia/Shanghai`。
+`15` 分是为了避开整点上的其它定时任务。宿主机若不是中国时区，每日 cron 要改，不在代码里写死 `Asia/Shanghai`。插件不参与 cookie keepalive。
 
 手动口与定时走同一函数。`dry_run` 或接口 `apply=false` 时只记结果。
 
-## 115 认证
+## 115 会话
 
-目标账号是主号 **`101481377`**。插件每次任务开始先 `whoami`。不是这个 id（例如记忆里误用过的 `4414522`）就停止并通知，不建目录、不提交。
+会话只有 MoviePilot 已经登录的 **`U115Pan`**（存储 ID 默认 `u115`，类是 `WeakSingleton`，token 在 MoviePilot 自己的存储配置里刷新）。插件不创建 `P115Client`，不读 `115-cookies.txt`，不做 Open / cookie 模式开关，不核对 `101481377`。任务开始时 `U115Pan.check()` 必须为真；否则通知「115 未登录」并停止，不扫码。
 
-**不使用 CloudDrive2。** 不调用 CD2 gRPC，不把 `/115open/...` 当文件系统去列。你现在的收件箱说法 `/115open/离线下载/动漫/YYYYMMDD` 里，`/115open` 只是挂载前缀。p115 看到的路径是 `/离线下载/动漫/YYYYMMDD`。若你的网盘里真实目录仍带 `115open` 这段，用配置改 `offline_root`，而不是改回 CD2。
+**不使用 CloudDrive2，也不使用本机下载器。** 不调用 CD2。`DownloaderHelper` 以及 qBittorrent / Transmission / rTorrent 是本机做种客户端，不是 115 离线。`StorageChain.download_file` 是把云盘文件拉到本地磁盘，不用它提交磁力。
 
-写操作全部走 **同一个** `P115Client`，避免 MoviePilot Open 存储和网页 cookie 各看各的文件 id。
+口头路径 `/115open/离线下载/动漫/YYYYMMDD` 里，`/115open` 只是旧挂载前缀。`U115Pan` 使用的路径是 `/离线下载/动漫/YYYYMMDD`。配置里若带上这个前缀，插件只做字符串剥离。网盘里的真实目录若仍含 `115open` 这段，改 `offline_root`，不改调用方式。
 
-| 能力 | p115client 方法 | 通道 |
-| --- | --- | --- |
-| 提交磁力 | `clouddownload_task_add_url` | 网页，`lixianssp add_task_url`，落到当天目录的 cid |
-| 查进度 | `clouddownload_task_list` | 网页 |
-| 配额 | `clouddownload_quota_info` | 提交前看剩余次数，不够就停并通知 |
-| 建目录 / 列目录 / 移动 | `fs_mkdir`、`fs_files`、`fs_move` | 同一个 cookie 客户端 |
+对照的是 MoviePilot `v2` 分支当前源码。`StorageChain` 没有离线方法，也没有 `move`。`U115Pan` 有列目录、建目录和 `move`。离线任务没有公开包装方法，所以提交和查进度走这个对象已有的 `access_token` 与 `_request_api`（限流和 token 刷新都在里面）。插件不复制一套登录。
 
-`p115_mode=open` 时才改用 `clouddownload_task_add_urls_open` 和 open 文件接口，并且 token 来自另一个文件，不从 MoviePilot 配置里挖。默认不走这条，因为 open 的离线接口经常加不进任务或落进根目录「云下载」。
+| 步骤 | 调用 |
+| --- | --- |
+| 是否已登录 | `U115Pan.check()` |
+| 按路径取文件或目录 | `StorageChain.get_file_item(storage, Path)` |
+| 列一层 | `StorageChain.list_files(fileitem, recursion=False)` |
+| 确保当天目录、季目录存在 | `StorageChain.get_folder(storage, Path)`，没有则递归创建。返回的 `FileItem.fileid` 就是离线保存目录 id |
+| 只改名、不搬家 | `StorageChain.rename_file(fileitem, name)`。仅 `rename_episodes` 打开且集数确定时使用 |
+| 搬家（整理和摊平） | `U115Pan.move(fileitem, 目标目录 Path, new_name)`。`StorageChain` 没有对应方法。不改名时 `new_name` 传当前文件名。宿主的 `move` 在移动成功后还会 `rename`；同名 rename 视为成功 |
+| 删除空包装目录 | `StorageChain.delete_file`。先 `list_files` 确认里面没有视频和字幕。不用 `delete_media_file`，它会按媒体库规则继续删上级 |
+| 提交一条磁力 | `U115Pan._request_api("POST", "/open/offline/add_task_urls", data={"urls": magnet, "wp_path_id": 当天目录 fileid})`。一次一条 |
+| 查离线进度 | `U115Pan._request_api("GET", "/open/offline/get_task_list", params={"page": n})`，用提交时记下的 infohash 对上那一条 |
+| 提交前看配额 | `U115Pan._request_api("GET", "/open/offline/get_quota_info")`。剩余次数不够，或添加接口返回配额错误：本轮停止并通知 |
 
-cookie 文件沿用现有 keepalive（开机 flag，以及 09:00 / 15:00 / 21:00），插件不再写一套续期。文件读失败或接口 405：通知，不扫码，不回退 CD2。日志里 cookie 打码。
+完成态以 `get_task_list` 里该 infohash 的完成标志为准，不把「目录里已经出现文件」当成下完。字段名按 115 Open 这条接口的返回读取，不另猜一套状态机。添加接口若把文件放进「云下载」而不是 `wp_path_id`，把这次记为失败并通知，不换 cookie 客户端、不换 CD2。
 
-`requirements.txt` 只声明 `p115client`。实现时钉一个当时验证过的版本：0.0.9.x 删改过不少方法名，不能写无版本下限的浮动依赖。
+插件不再带 `requirements.txt`。用宿主里已有的 `U115Pan`，不声明 `p115client`。
 
-MoviePilot 自带的 `StorageChain` / `u115` 只作为 AV 插件的结构参照。本插件第一版不用它做移动，免得 open 文件 id 和网页离线任务对不上。
-
-限速：磁力一条一条提交，默认间隔 20 秒（AV 走 CD2 时是 45–60 秒；p115 仍要保守，可调）。移动间隔默认 2 秒。遇到 406 / `770004` 这类风控：这次到此为止，指数退避留到下一轮 cron，不在同一轮里猛重试。不要 `list` 整个动漫库根来找一部剧；整理只看本插件记下的任务目录和配置的库根下一层。
+限速：`_request_api` 自带约 3 QPS 和 429 冷却。插件仍按 `offline_gap_seconds`（默认 20 秒）隔开两次添加，按 `move_gap_seconds`（默认 2 秒）隔开两次移动。429 或风控：本轮停止，下一轮 cron 再继续，不在同一轮里猛重试。整理不列举整个动漫库根，只看本插件记下的任务目录和库根下要进入的那一层。
 
 ## 动漫花园：搜索和过滤
 
@@ -228,7 +228,7 @@ MoviePilot 自带的 `StorageChain` / `u115` 只作为 AV 插件的结构参照�
 
 ## 离线完成后的整理
 
-整理任务只认 `tasks` 里状态变为完成的记录。完成判定来自 `clouddownload_task_list` 的完成状态，不靠「目录里出现了文件」猜测，避免下到一半就搬走。
+整理任务只认 `tasks` 里状态变为完成的记录。完成判定来自上一节的 `get_task_list`，不靠「目录里出现了文件」猜测，避免下到一半就搬走。目标目录先 `StorageChain.get_folder`，再 `U115Pan.move`。
 
 目标形状（`rename_episodes` 关闭时）：
 
@@ -288,10 +288,10 @@ strm（默认关）：若以后打开，沿用 AV 插件的写法，但多一条
 
 | 现在 | 插件上线后 |
 | --- | --- |
-| Bot 搜 dmhy、p115 离线到 `/115open/离线下载/动漫/日期` | 同一收件箱（去掉挂载前缀），由插件提交。确认第一天干跑正确之前，bot 任务先停，避免双倍离线 |
+| Bot 搜 dmhy，再用另一套客户端离线到 `/115open/离线下载/动漫/日期` | 同一收件箱（去掉挂载前缀），由插件经 MoviePilot 的 `U115Pan` 提交。确认第一天干跑正确之前，bot 任务先停，避免双倍离线 |
 | Bot 每两小时摊平，全碰撞就不动 | 同一安全门，开关默认关 |
-| cookie keepalive 写 `115-cookies.txt` | 继续由 keepalive 写，插件只读 |
-| CD2 做 115 文件操作 | 停用。405 不再当成需要换接口重试的信号 |
+| cookie keepalive 写 `115-cookies.txt` | 与本插件无关。插件不读这个文件 |
+| CD2 做 115 文件操作 | 插件不调用 CD2 |
 | Emby 库 `F:\动漫`、strm 与本地 mkv 混放 | 第一版不写 strm，避免叠在已有 mkv 上。库内整理只发生在 115 |
 | 追更名单在 bot 里 | 本仓库没有这份名单。需要你贴进 `watchlist` |
 
@@ -303,29 +303,29 @@ Bot 例行任务的关闭不在本仓库里做。计划批准并插件干跑通�
 
 1. 插件壳、表单、三个空任务、状态页。不接网。
 2. dmhy 解析和打分，加单测。每日任务只打印将要提交的磁力。
-3. p115 cookie、账号校验、建当天目录、提交与轮询。仍可用干跑绕过提交。
+3. 用已登录的 `U115Pan` 建当天目录、提交离线、轮询。不引入第二套登录。干跑仍跳过提交。
 4. 整理：只移动确定项。
 5. 摊平分类器和安全门单测，然后接上只读扫描。`flatten_apply` 仍默认关。
 6. 你明确要求后再做 strm 和 Emby 刷新。
 
-单测用 `python -m unittest`，只覆盖纯函数：打分、集数、去重、摊平分类、路径里的 `/115open` 前缀剥离、账号不符时拒绝。不在 CI 里打 dmhy 或 115。
+单测用 `python -m unittest`，只覆盖纯函数：打分、集数、去重、摊平分类、路径里的 `/115open` 前缀剥离、`check()` 失败时拒绝提交。不在 CI 里打 dmhy 或 115。
 
 中文 docstring 按 MoviePilot 插件审查习惯加在公有类和函数上。日志用 MoviePilot 的 `logger`。
 
 ## 风险
 
-- **cookie 和 open 不是同一套凭据。** 混用会导致「任务下进 A 目录，移动接口却在 B 账号上找不到」。所以写路径固定一个客户端，并用 `expected_user_id` 卡住。
-- **open 离线接口不完整。** 默认网页 cookie。open 模式要单独验证磁力会进当天 cid，而不是 `/云下载`。
-- **p115client 小版本不兼容。** 钉版本，调用包一层，方法缺失就失败并提示，不换 CD2。
+- **离线没有公开包装方法。** `v2` 的 `StorageChain` 不能提交磁力。插件只通过已登录的 `U115Pan._request_api` 打 `/open/offline/add_task_urls` 和 `get_task_list`。若安装的宿主把 `_request_api` 改了签名，实现时对着那台宿主改调用，仍然不另建客户端。
+- **添加接口可能忽略 `wp_path_id`，文件进「云下载」。** 这种情况记失败并通知，不改走 cookie 或 CD2。
+- **`U115Pan.move` 移动后会再 rename。** 不改名的整理和摊平传入当前文件名，同名 rename 当成功。rename 失败则这次移动记失败，不删源目录。
 - **dmhy 页面改版或拦机房 IP。** RSS 优先；失败就停，不提交空结果。MoviePilot 所在的 Windows 要能访问 `share.dmhy.org`。
 - **简体标题对不上繁体发布名。** 靠别名行。别名没填就会漏，这是可接受的漏，不是错下。
 - **整包被当成单集。** 体积上限和合集关键词负责挡住。挡不住的留在收件箱（集数不确定）。
 - **摊平误伤已经排好的季目录。** 保护根、不改基名、目标已存在即碰撞。全碰撞则零移动。
-- **115 风控。** 间隔、单次上限、遇 770004 停止。
+- **115 风控。** 间隔、单次上限。`U115Pan` 自己的 429 冷却触发后，本轮停止。
 - **和 bot 双开。** 迁移动作里写明先停 bot。
 - **strm 盖住已有 mkv，或 strm 写了 `127.0.0.1`。** 第一版不做 strm；以后做也跳过已有 mkv，并且用 `192.168.1.10`。
 - **V2 宿主以后升级到 V3 插件装不上。** `system_version` 标死 `<3`。不在这次做 V3。
-- **配置进了 git。** cookie 只留文件路径。`PLAN.md` 不写 cookie 值。
+- **配置进了 git。** 插件配置里没有 cookie，也没有 token。登录只留在 MoviePilot 自己的存储配置里。
 
 ## 这次明确不做
 
@@ -333,7 +333,7 @@ Bot 例行任务的关闭不在本仓库里做。计划批准并插件干跑通�
 - 不做 JavBus、番号、AV 库。
 - 不自动发现新番（没有追更列表就不搜）。
 - 不按 TMDB/TVDB 刮 nfo。那是 Emby 或以后的开关。
-- 不在插件里续 cookie、不扫码登录。
+- 不引入 `P115Client`、cookie 文件、Open 模式开关，也不在插件里扫码或刷新 token。登录完全沿用 MoviePilot 已有的 `U115Pan`。
 - 不改 bot 进程。本计划只规定何时可以停它。
 
 ## 需要你拍板的项
@@ -347,11 +347,11 @@ Bot 例行任务的关闭不在本仓库里做。计划批准并插件干跑通�
 5. **第一版要不要写 strm？** 建议不要。Emby 路径 `F:\动漫` 和 Unraid 上的库路径还没对上，且库里已经有 mkv。只做 115 目录整理。
 6. **摊平扫描根**有哪些？建议先只扫收件箱 `/离线下载/动漫`，不要扫整个库，直到干跑稳定。确认「摊平 = 去掉重复包装目录、不改文件名」。
 7. **安全门粒度**：建议全局只要有至少一条 `ok_eligible_non_collision` 就只执行那些安全条；碰撞/不确定跳过。备选是「同一目录里出现任何不确定，则该目录一条都不动」。
-8. **cookie 文件**在 MoviePilot 这台 Windows 上的路径，是不是 `C:\Users\Administrator\strm_redirect\115-cookies.txt`？账号是不是必须等于 `101481377`？建议两条都是。
+8. **已按更正关掉。** 不读 cookie 文件，不强制用户号 `101481377`。还要确认的只是：MoviePilot 里这个 115 的存储 ID 是不是 `u115`。建议是。
 9. **每日时刻和时区。** 建议宿主机本地 `15 10 * * *`。若 Windows 不是中国时区，请给出要换成的 cron。
 10. **整理之后刷不刷 Emby「动漫」库？** 建议第一版不刷。strm 没写之前，115 上的移动 Emby 不一定看得见。
 11. **bot 何时停？** 建议插件每日干跑对上一天之后立刻停 bot 的补磁力和摊平，再把插件 `dry_run` 关掉。不要并行写 115。
 12. **分辨率和合集。** 建议只收 1080、要字幕、不收合集、回溯 36 小时、单集 80MB–8GB。
-13. **这台 MoviePilot 是否已经用主号登了 115？** 插件不依赖这个登录（自己读 cookie 文件），但若 open 模式以后要开，需要你确认 token 也是 `101481377`。
+13. **已按更正关掉。** 插件使用 MoviePilot 当前的 115 登录，不准备第二套 Open 或 cookie 登录。
 
 批准之后的实现 PR 只做第 1–5 步里你点名的范围，并继续让 `dry_run` 和 `flatten_apply` 默认关闭。
