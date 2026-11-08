@@ -17,15 +17,15 @@ from .anime_pan import CookieSession
 from .anime_progress import advance, format_progress, format_state
 from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
 from .anime_flatten import Node
-from .anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize
+from .anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize, run_strm as write_library_strm
 from .anime_names import Show, norm, parse_watchlist
 from .anime_tmdb import live_bounds, shanghai_today
 
 _FORM_NOTE = (
     "先保持「只预览」。115 Cookie 含 UID= 时，本轮离线、整理和摊平都走这条 Cookie。"
     "留空或没有 UID= 时使用存储 ID 对应的已登录 115，默认 u115。"
-    "strm 目录填这台 Emby 媒体库正在扫描的路径。"
-    "播放地址走 MoviePilot 上已启用的 115网盘STRM助手跳转，填外网域名，不能写 127.0.0.1。"
+    "strm 目录填这台 Emby 媒体库正在扫描的路径。整理成功后按季目录写 strm，不写 nfo。"
+    "已经在库里的文件用 job=strm 补 strm，不移动。播放地址走 MoviePilot 上已启用的 115网盘STRM助手跳转，填外网域名，不能写 127.0.0.1。"
     "摊平即使关了预览，也要另开「摊平允许落盘」才会移动。"
 )
 
@@ -36,7 +36,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.14"
+    plugin_version = "1.0.15"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -136,7 +136,7 @@ class Anime115(_PluginBase):
                 "methods": ["POST"],
                 "auth": "apikey",
                 "summary": "运行任务",
-                "description": "job=daily、organize 或 flatten",
+                "description": "job=daily、organize、flatten 或 strm。strm 可带 root=某一剧目录",
             },
             {
                 "path": "/status",
@@ -281,11 +281,15 @@ class Anime115(_PluginBase):
         if cancel is not None:
             cancel.set()
 
-    def api_run(self, job: str = "daily", **kwargs) -> dict:
-        """按 job 启动任务。"""
+    def api_run(self, job: str = "daily", root: str = "", **kwargs) -> dict:
+        """按 job 启动任务。strm 的 root 只补那一部剧。"""
         if not self._enabled:
             return {"ok": False, "error": "插件未启用"}
         name = str(kwargs.get("job") or job or "daily")
+        limit = str(kwargs.get("root") or root or "").strip()
+        if name == "strm":
+            threading.Thread(target=lambda: self.run_strm(limit), name="anime115-strm", daemon=True).start()
+            return {"ok": True, "message": "已开始", "job": name}
         target = {"daily": self.run_daily, "organize": self.run_organize, "flatten": self.run_flatten}.get(name)
         if target is None:
             return {"ok": False, "error": "未知任务"}
@@ -314,6 +318,11 @@ class Anime115(_PluginBase):
     def run_flatten(self) -> dict:
         """给整包分类，满足安全门才移动。"""
         return self._guard("flatten", self._flatten)
+
+    def run_strm(self, root: str = "") -> dict:
+        """给库里已有的视频补 strm，不移动。"""
+        self._strm_limit = root
+        return self._guard("strm", self._strm)
 
     def _guard(self, kind: str, func) -> dict:
         if not hasattr(self, "_lock"):
@@ -387,6 +396,10 @@ class Anime115(_PluginBase):
     def _flatten(self) -> dict:
         return run_flatten(self._session(), self._config(), report=self._report)
 
+    def _strm(self) -> dict:
+        limit = getattr(self, "_strm_limit", "") or ""
+        return write_library_strm(self._session(), self._config(), limit, report=self._report)
+
     def _config(self) -> JobConfig:
         prefer = [item.strip() for item in self._fansub_prefer.split(",") if item.strip()]
         roots = []
@@ -416,6 +429,8 @@ class Anime115(_PluginBase):
             max_submit_per_run=self._max_submit_per_run,
             move_gap_seconds=self._move_gap_seconds,
             min_episode_mb=self._min_episode_mb,
+            strm_root=self._strm_root,
+            play_base=self._play_base,
         )
 
     def _report(self, patch: dict) -> None:
@@ -526,8 +541,12 @@ class Anime115(_PluginBase):
             lines.append(f"跳过  {item.get('show')}  {item.get('reason')}  {item.get('title')}")
         for item in (data.get("moves") or [])[:20]:
             lines.append(
-                f"整理  {item.get('action')}  {item.get('reason')}  {item.get('pack') or ''}  {item.get('dest_dir') or ''}".rstrip()
+                f"整理  {item.get('action')}  {item.get('reason')}  {item.get('pack') or ''}  {item.get('dest_dir') or ''}  {item.get('strm') or item.get('strm_error') or ''}".rstrip()
             )
+        for item in (data.get("items") or [])[:20]:
+            if data.get("job") != "strm":
+                continue
+            lines.append(f"strm  {item.get('action')}  {item.get('reason')}  {item.get('path') or ''}")
         return "\n".join(lines)
 
 

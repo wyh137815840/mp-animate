@@ -5,10 +5,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .anime_dmhy import Pick, SearchOptions, select_shows
 from .anime_flatten import Node, apply_proposals, propose
+from .anime_config import PLAY_BASE
 from .anime_names import Show, _fold_name, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
+from .anime_strm import build_play_url, pickcode_of, strm_relative, write_strm
 
 
 SUB_EXTS = {".ass", ".srt", ".ssa", ".sup", ".sub", ".idx", ".vtt"}
@@ -33,6 +36,8 @@ class JobConfig:
     max_submit_per_run: int = 10
     move_gap_seconds: int = 2
     min_episode_mb: int = 80
+    strm_root: str = ""
+    play_base: str = ""
 
 
 def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None) -> dict:
@@ -187,6 +192,8 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
             season_name = decision["dest_dir"].rsplit("/", 1)[-1]
             decision["dest_dir"] = join_path(join_path(library, show_folder), season_name)
     if decision["action"] != "move" or config.dry_run:
+        if decision["action"] == "move" and config.dry_run:
+            _apply_strm(decision, config, write=False)
         return
     dest_dir = decision["dest_dir"]
     try:
@@ -212,6 +219,62 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
             return
         session.sleep(config.move_gap_seconds)
     task["status"] = "moved"
+    _apply_strm(decision, config, write=True)
+
+
+def run_strm(session, config: JobConfig, limit: str = "", report=None) -> dict:
+    """给库里已经整理好的视频补 strm。不移动 115 上的文件，也不写 nfo。"""
+    library = strip_mount_prefix(config.library_root, config.mount_prefix) if config.library_root else ""
+    root = (config.strm_root or "").strip()
+    if not root:
+        return {"ok": False, "error": "没有填写 strm 目录", "items": [], "dry_run": config.dry_run}
+    if not library or library == "/":
+        return {"ok": False, "error": "没有填写库根", "items": [], "dry_run": config.dry_run}
+    if not session.check_login():
+        return {"ok": False, "error": "115 未登录", "items": [], "dry_run": config.dry_run}
+    chosen = strip_mount_prefix(limit, config.mount_prefix) if (limit or "").strip() else ""
+    if chosen and chosen != library and not chosen.startswith(library + "/"):
+        return {"ok": False, "error": "路径不在库根下", "items": [], "dry_run": config.dry_run}
+    rows = _library_videos(session, library, chosen)
+    items = []
+    written = skipped = failed = 0
+    _tell(report, job="strm", phase="running", dry_run=config.dry_run, index=0, total=len(rows), written=0, skipped=0, failed=0, current="", result="")
+    for index, row in enumerate(rows, start=1):
+        item = _strm_one(row, config)
+        items.append(item)
+        if item["action"] == "write" and not config.dry_run and not item.get("error"):
+            written += 1
+            result = "ok"
+        elif item["action"] == "write" and config.dry_run:
+            written += 1
+            result = "ok"
+        elif item.get("error"):
+            failed += 1
+            result = item["error"]
+        else:
+            skipped += 1
+            result = item.get("reason") or "跳过"
+        _tell(
+            report,
+            job="strm",
+            phase="running",
+            dry_run=config.dry_run,
+            index=index,
+            total=len(rows),
+            current=row["name"],
+            result=result,
+            written=written,
+            skipped=skipped,
+            failed=failed,
+        )
+    return {
+        "ok": True,
+        "dry_run": config.dry_run,
+        "written": written,
+        "skipped": skipped,
+        "failed": failed,
+        "items": items,
+    }
 
 
 def run_flatten(session, config: JobConfig, report=None) -> dict:
@@ -786,8 +849,99 @@ def _decide_move(task: dict, files: list[Node], library: str) -> dict:
         "task": task.get("infohash"),
         "dest_dir": dest_dir,
         "name": video.name,
+        "season": season,
+        "episode": episode,
         "nodes": [video, *sidecars],
     }
+
+
+_SEASON_DIR = re.compile(r"^season\s*(\d{1,2})$", re.IGNORECASE)
+
+
+def _apply_strm(decision: dict, config: JobConfig, write: bool) -> None:
+    """整理成功后写 strm。strm 根为空就什么都不做。"""
+    root = (config.strm_root or "").strip()
+    if not root or decision.get("action") != "move":
+        return
+    video = next((item for item in decision.get("nodes") or [] if item.name == decision.get("name")), None)
+    if video is None:
+        decision["strm_error"] = "没有视频"
+        return
+    code = pickcode_of(video)
+    if not code:
+        decision["strm_error"] = "缺少 pickcode"
+        return
+    show = name_of(parent_path(decision["dest_dir"]))
+    season = _season_dir_number(name_of(decision["dest_dir"])) or int(decision.get("season") or 0)
+    episode = int(decision.get("episode") or 0)
+    if season <= 0 or episode <= 0:
+        decision["strm_error"] = "集数对不上"
+        return
+    relative = strm_relative(show, season, episode, video.name)
+    url = build_play_url(config.play_base or PLAY_BASE, code, video.name)
+    if not write:
+        decision["strm"] = str(Path(root) / relative)
+        return
+    try:
+        decision["strm"] = write_strm(root, relative, url)
+    except OSError as exc:
+        decision["strm_error"] = f"strm 写入失败：{exc}"
+
+
+def _library_videos(session, library: str, limit: str) -> list[dict]:
+    """库根下 Show/Season/视频。limit 可以是某一剧的目录。"""
+    library = norm(library)
+    if limit and norm(limit) != library:
+        shows = [Node(norm(limit), name_of(limit), True)]
+    else:
+        shows = [item for item in (session.list_dir(library) or []) if item.is_dir]
+    rows = []
+    for show in shows:
+        for child in session.list_dir(show.path) or []:
+            season_no = _season_dir_number(child.name) if child.is_dir else 0
+            if season_no:
+                for video in session.list_dir(child.path) or []:
+                    if _is_video_file(video):
+                        rows.append(_video_row(show.name, season_no, video))
+                continue
+            if _is_video_file(child):
+                rows.append(_video_row(show.name, 0, child))
+    return rows
+
+
+def _video_row(show: str, season_no: int, video: Node) -> dict:
+    parsed = parse_episode(video.name)
+    season = season_no or (parsed[0] if parsed else 0)
+    episode = parsed[1] if parsed else 0
+    if season_no and parsed and parsed[0] != season_no:
+        season = season_no
+    return {"show": show, "season": season, "episode": episode, "name": video.name, "node": video}
+
+
+def _strm_one(row: dict, config: JobConfig) -> dict:
+    video = row["node"]
+    if row["season"] <= 0 or row["episode"] <= 0:
+        return {"action": "skip", "reason": "集数对不上", "name": video.name, "path": ""}
+    code = pickcode_of(video)
+    if not code:
+        return {"action": "skip", "reason": "缺少 pickcode", "name": video.name, "path": ""}
+    relative = strm_relative(row["show"], row["season"], row["episode"], video.name)
+    url = build_play_url(config.play_base or PLAY_BASE, code, video.name)
+    path = str(Path(config.strm_root) / relative)
+    if config.dry_run:
+        return {"action": "write", "reason": "ok", "name": video.name, "path": path}
+    try:
+        written = write_strm(config.strm_root, relative, url)
+    except OSError as exc:
+        return {"action": "write", "reason": "strm 写入失败", "error": f"strm 写入失败：{exc}", "name": video.name, "path": path}
+    return {"action": "write", "reason": "ok", "name": video.name, "path": written}
+
+
+def _season_dir_number(name: str) -> int:
+    matched = _SEASON_DIR.match((name or "").strip())
+    if not matched:
+        return 0
+    return int(matched.group(1))
 
 
 def _public_move(decision: dict) -> dict:

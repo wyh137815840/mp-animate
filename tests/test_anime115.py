@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -28,7 +29,8 @@ from anime115.anime_dmhy import (  # noqa: E402
     select_one,
 )
 from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
-from anime115.anime_jobs import JobConfig, resolve_show_folder, run_daily, run_flatten, run_organize  # noqa: E402
+from anime115.anime_jobs import JobConfig, resolve_show_folder, run_daily, run_flatten, run_organize, run_strm  # noqa: E402
+from anime115.anime_strm import build_play_url, episode_strm_name  # noqa: E402
 from anime115.anime_config import PLAY_BASE, offline_directory, usable_cookie  # noqa: E402
 from anime115.anime_jobs import _finished_hashes  # noqa: E402
 from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix, title_matches  # noqa: E402
@@ -615,6 +617,117 @@ class JobTest(unittest.TestCase):
         self.assertEqual(result["moves"][0]["pack"], sato_pack)
         self.assertEqual(result["moves"][0]["name"], video)
 
+    def test_organize_writes_versioned_strm_and_skips_when_root_empty(self):
+        show = "冷淡的佐藤同学只对我撒娇 (2026)"
+        loli = "[LoliHouse] Shiotaiou - 05 [WebRip].mkv"
+        ani = "[ANi] Shiotaiou - 05 [1080P].mkv"
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Fake()
+            session.offline = [{"info_hash": HASH, "status": 2}, {"info_hash": "b" * 40, "status": 2}]
+            session.dirs["/动漫"] = [Node("/动漫/" + show, show, True)]
+            session.dirs["/box/loli"] = [
+                Node("/box/loli/" + loli, loli, False, 900 * 1024 * 1024, raw={"pc": "lolihousecode0001"}),
+            ]
+            session.dirs["/box/ani"] = [
+                Node("/box/ani/" + ani, ani, False, 900 * 1024 * 1024, raw={"pc": "anicode000000002"}),
+            ]
+            tasks = [
+                {"infohash": HASH, "show": "冷淡的佐藤同学只对我撒娇", "season": 1, "episode": 5, "title": loli, "folder": "/box/loli", "status": "submitted"},
+                {"infohash": "b" * 40, "show": "冷淡的佐藤同学只对我撒娇", "season": 1, "episode": 5, "title": ani, "folder": "/box/ani", "status": "submitted"},
+            ]
+            result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫", strm_root=tmp, play_base=PLAY_BASE))
+            self.assertEqual(result["moves"][0]["action"], "move")
+            self.assertEqual(result["moves"][1]["action"], "move")
+            paths = sorted(Path(tmp).rglob("*.strm"))
+            self.assertEqual(len(paths), 2)
+            names = sorted(path.name for path in paths)
+            prefix = f"{show} - S01E05 - "
+            self.assertTrue(all(name.startswith(prefix) for name in names))
+            self.assertNotEqual(names[0], names[1])
+            text = paths[0].read_text(encoding="utf-8").strip()
+            self.assertIn("pickcode=", text)
+            self.assertIn("file_name=", text)
+            self.assertTrue(text.startswith("https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url"))
+            self.assertFalse(list(Path(tmp).rglob("*.nfo")))
+            self.assertFalse(list(Path(tmp).rglob("*.jpg")))
+        with tempfile.TemporaryDirectory() as preview_root:
+            session = _Fake()
+            session.offline = [{"info_hash": HASH, "status": 2}]
+            session.dirs["/动漫"] = [Node("/动漫/" + show, show, True)]
+            session.dirs["/box/loli"] = [
+                Node("/box/loli/" + loli, loli, False, 900 * 1024 * 1024, raw={"pc": "lolihousecode0001"}),
+            ]
+            preview = run_organize(
+                [{"infohash": HASH, "show": "冷淡的佐藤同学只对我撒娇", "season": 1, "episode": 5, "title": loli, "folder": "/box/loli", "status": "submitted"}],
+                session,
+                JobConfig(dry_run=True, library_root="/动漫", strm_root=preview_root, play_base=PLAY_BASE),
+            )
+            self.assertEqual(preview["moves"][0]["action"], "move")
+            self.assertTrue(preview["moves"][0]["strm"].endswith(".strm"))
+            self.assertEqual(list(Path(preview_root).rglob("*.strm")), [])
+            self.assertEqual(session.moves, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Fake()
+            session.offline = [{"info_hash": HASH, "status": 2}]
+            session.dirs["/box"] = [Node("/box/E03.mkv", "E03.mkv", False, 900 * 1024 * 1024)]
+            bare = run_organize(
+                [{**tasks[0], "status": "submitted", "infohash": HASH}],
+                session,
+                JobConfig(dry_run=True, library_root="/动漫"),
+            )
+            self.assertNotIn("strm", bare["moves"][0])
+
+    def test_missing_pickcode_still_moves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Fake()
+            session.offline = [{"info_hash": HASH, "status": 2}]
+            session.dirs["/box"] = [Node("/box/E03.mkv", "E03.mkv", False, 900 * 1024 * 1024)]
+            tasks = [{
+                "infohash": HASH,
+                "show": "佐藤同学",
+                "season": 1,
+                "episode": 3,
+                "title": "佐藤同学 - 03",
+                "folder": "/box",
+                "status": "submitted",
+            }]
+            result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫", strm_root=tmp, play_base=PLAY_BASE))
+            self.assertEqual(result["moves"][0]["action"], "move")
+            self.assertEqual(result["moves"][0]["strm_error"], "缺少 pickcode")
+            self.assertEqual(list(Path(tmp).rglob("*.strm")), [])
+            self.assertEqual(tasks[0]["status"], "moved")
+
+    def test_strm_backfill_does_not_move(self):
+        show = "魔法★探险家 (2026)"
+        video = "[LoliHouse] Magical Explorer - 02 [WebRip].mkv"
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Fake()
+            session.dirs["/动漫"] = [Node("/动漫/" + show, show, True)]
+            session.dirs["/动漫/" + show] = [Node(f"/动漫/{show}/Season 01", "Season 01", True)]
+            session.dirs[f"/动漫/{show}/Season 01"] = [
+                Node(f"/动漫/{show}/Season 01/{video}", video, False, 900 * 1024 * 1024, raw={"pc": "magiccode0000001"}),
+                Node(f"/动漫/{show}/Season 01/NCOP.mkv", "NCOP.mkv", False, 80 * 1024 * 1024, raw={"pc": "ncopcode00000001"}),
+            ]
+            result = run_strm(session, JobConfig(dry_run=False, library_root="/动漫", strm_root=tmp, play_base=PLAY_BASE), f"/动漫/{show}")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["written"], 1)
+            self.assertEqual(result["skipped"], 1)
+            self.assertEqual(session.moves, [])
+            written = list(Path(tmp).rglob("*.strm"))
+            self.assertEqual(len(written), 1)
+            self.assertIn("S01E02", written[0].name)
+            self.assertTrue(written[0].name.startswith(f"{show} - S01E02 - "))
+            self.assertIn("magiccode0000001", written[0].read_text(encoding="utf-8"))
+            self.assertFalse(list(Path(tmp).rglob("*.nfo")))
+
+    def test_play_url_matches_av_template(self):
+        url = build_play_url(PLAY_BASE, "abcDEF1234567890x", "佐藤 05.mkv")
+        self.assertIn("pickcode=abcDEF1234567890x", url)
+        self.assertIn("file_name=", url)
+        self.assertNotIn("{pickcode}", url)
+        self.assertNotIn("{filename}", url)
+        self.assertTrue(episode_strm_name("剧 (2026)", 1, 5, "剧 (2026) - S01E05 - 已有.mkv").startswith("剧 (2026) - S01E05"))
+
     def test_flatten_does_nothing_when_all_collision(self):
         session = _Fake()
         session.dirs["/inbox"] = [Node("/inbox/show", "show", True)]
@@ -782,12 +895,12 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.14")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.15")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
-        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress"):
+        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm"):
             self.assertNotIn(name, sys.modules)
-        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress"):
+        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm"):
             self.assertIn(f"app.plugins.anime115.{name}", sys.modules)
         _form, defaults = plugin.Anime115.get_form(None)
         for key in ("cookie", "offline_dir", "strm_root", "play_base", "storage"):

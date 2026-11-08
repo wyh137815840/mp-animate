@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-_VERBS = {"daily": "每日", "organize": "整理", "flatten": "摊平"}
+_VERBS = {"daily": "每日", "organize": "整理", "flatten": "摊平", "strm": "strm"}
 
 
 def format_state(snap: dict | None) -> str:
@@ -53,6 +53,8 @@ def _counters(data: dict) -> str:
     job = data.get("job")
     if job == "organize":
         return f"已整理 {int(data.get('organized') or 0)}，跳过 {skipped}，失败 {failed}"
+    if job == "strm":
+        return f"已写 {int(data.get('written') or 0)}，跳过 {skipped}，失败 {failed}"
     if job == "flatten":
         return f"已移动 {int(data.get('moved') or 0)}，跳过 {skipped}，失败 {failed}"
     return (
