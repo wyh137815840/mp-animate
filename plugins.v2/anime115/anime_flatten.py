@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from anime_names import join_path, name_of, norm, parent_path
+from .anime_names import join_path, name_of, norm, parent_path
 
 
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".ts", ".m2ts"}

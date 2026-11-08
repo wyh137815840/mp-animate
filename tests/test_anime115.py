@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins.v2" / "anime115"))
-
 from urllib.request import ProxyHandler
 
-from anime_dmhy import (
+_ROOT = Path(__file__).resolve().parents[1] / "plugins.v2" / "anime115"
+_pkg = types.ModuleType("anime115")
+_pkg.__path__ = [str(_ROOT)]
+_pkg.__package__ = "anime115"
+sys.modules["anime115"] = _pkg
+
+from anime115.anime_dmhy import (  # noqa: E402
     SearchOptions,
     Torrent,
     merge_sizes,
@@ -22,9 +27,9 @@ from anime_dmhy import (
     rss_opener,
     select_one,
 )
-from anime_flatten import Node, apply_proposals, propose
-from anime_jobs import JobConfig, run_daily, run_flatten, run_organize
-from anime_names import parse_episode, parse_watchlist, strip_mount_prefix
+from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
+from anime115.anime_jobs import JobConfig, run_daily, run_flatten, run_organize  # noqa: E402
+from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix  # noqa: E402
 
 
 NOW = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
@@ -279,6 +284,55 @@ class JobTest(unittest.TestCase):
         self.assertEqual(result["counts"]["ok_eligible_non_collision"], 0)
         self.assertEqual(result["moved"], 0)
         self.assertEqual(session.moves, [])
+
+
+class ImportTest(unittest.TestCase):
+    def test_package_import_leaves_no_bare_module(self):
+        app = types.ModuleType("app")
+        app.__path__ = []
+        chain = types.ModuleType("app.chain")
+        chain.__path__ = []
+        storage = types.ModuleType("app.chain.storage")
+
+        class StorageChain:
+            pass
+
+        storage.StorageChain = StorageChain
+        log = types.ModuleType("app.log")
+        log.logger = types.SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None, error=lambda *_a, **_k: None)
+        plugins = types.ModuleType("app.plugins")
+        plugins.__path__ = []
+
+        class _PluginBase:
+            pass
+
+        plugins._PluginBase = _PluginBase
+        stale = types.ModuleType("anime_dmhy")
+        sys.modules["anime_dmhy"] = stale
+        for name, module in (
+            ("app", app),
+            ("app.chain", chain),
+            ("app.chain.storage", storage),
+            ("app.log", log),
+            ("app.plugins", plugins),
+        ):
+            sys.modules.setdefault(name, module)
+        spec = importlib.util.spec_from_file_location(
+            "app.plugins.anime115",
+            _ROOT / "__init__.py",
+            submodule_search_locations=[str(_ROOT)],
+        )
+        plugin = importlib.util.module_from_spec(spec)
+        sys.modules["app.plugins.anime115"] = plugin
+        spec.loader.exec_module(plugin)
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.4")
+        self.assertIs(sys.modules["anime_dmhy"], stale)
+        self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
+        for name in ("anime_names", "anime_jobs", "anime_flatten"):
+            self.assertNotIn(name, sys.modules)
+        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten"):
+            self.assertIn(f"app.plugins.anime115.{name}", sys.modules)
+        self.assertIs(plugin.parse_rss, sys.modules["app.plugins.anime115.anime_dmhy"].parse_rss)
 
 
 class _Fake:

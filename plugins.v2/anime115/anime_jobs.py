@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from anime_dmhy import Pick, SearchOptions, select_shows
-from anime_flatten import Node, apply_proposals, propose
-from anime_names import join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix
+from .anime_dmhy import Pick, SearchOptions, select_shows
+from .anime_flatten import Node, apply_proposals, propose
+from .anime_names import join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix
 
 
 SUB_EXTS = {".ass", ".srt", ".ssa", ".sup"}

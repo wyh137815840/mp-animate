@@ -12,7 +12,7 @@ from typing import Callable
 from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
 
-from anime_names import Show, parse_episode, title_matches
+from .anime_names import Show, parse_episode, title_matches
 
 
 _BATCH = re.compile(r"合集|全集|整季|batch|\bFin\b|BDrip|BDRip", re.IGNORECASE)

@@ -2,25 +2,20 @@
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-_DIR = str(Path(__file__).resolve().parent)
-if _DIR not in sys.path:
-    sys.path.insert(0, _DIR)
-
 from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
-from anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
-from anime_flatten import Node
-from anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize
-from anime_names import Show, norm, parse_watchlist
+from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
+from .anime_flatten import Node
+from .anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize
+from .anime_names import Show, norm, parse_watchlist
 
 
 class Anime115(_PluginBase):
@@ -29,7 +24,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
