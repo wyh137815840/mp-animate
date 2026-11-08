@@ -32,7 +32,7 @@ from anime115.anime_dmhy import (  # noqa: E402
 from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
 from anime115.anime_jobs import JobConfig, resolve_show_folder, run_daily, run_flatten, run_organize, run_strm  # noqa: E402
 from anime115.anime_strm import build_play_url, episode_strm_name  # noqa: E402
-from anime115.anime_config import PLAY_BASE, offline_directory, usable_cookie  # noqa: E402
+from anime115.anime_config import PLAY_BASE, PLAY_BASE_LAN, offline_directory, usable_cookie  # noqa: E402
 from anime115.anime_jobs import _finished_hashes  # noqa: E402
 from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix, title_matches  # noqa: E402
 from anime115.anime_pan import CookieSession, Pan115  # noqa: E402
@@ -43,6 +43,18 @@ from anime115.anime_tmdb import genre_ids_in, match_tv_id, progress_from_season,
 
 NOW = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
 HASH = "a" * 40
+
+
+def tasks_for_lan(video: str) -> list[dict]:
+    return [{
+        "infohash": HASH,
+        "show": "冷淡的佐藤同学只对我撒娇",
+        "season": 1,
+        "episode": 5,
+        "title": video,
+        "folder": "/box/loli",
+        "status": "submitted",
+    }]
 
 
 class NamesTest(unittest.TestCase):
@@ -768,6 +780,32 @@ class JobTest(unittest.TestCase):
         self.assertNotIn("{filename}", url)
         self.assertTrue(episode_strm_name("剧 (2026)", 1, 5, "剧 (2026) - S01E05 - 已有.mkv").startswith("剧 (2026) - S01E05"))
 
+    def test_lan_strm_mode_does_not_write_public_domain(self):
+        show = "冷淡的佐藤同学只对我撒娇 (2026)"
+        video = "[LoliHouse] Shiotaiou - 05 [WebRip].mkv"
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Fake()
+            session.offline = [{"info_hash": HASH, "status": 2}]
+            session.dirs["/动漫"] = [Node("/动漫/" + show, show, True)]
+            session.dirs["/box/loli"] = [
+                Node("/box/loli/" + video, video, False, 900 * 1024 * 1024, raw={"pc": "lolihousecode0001"}),
+            ]
+            result = run_organize(tasks_for_lan(video), session, JobConfig(
+                dry_run=False,
+                library_root="/动漫",
+                strm_root=tmp,
+                play_base=PLAY_BASE,
+                play_base_lan=PLAY_BASE_LAN,
+                strm_for="lan",
+            ))
+            self.assertEqual(result["moves"][0]["action"], "move")
+            written = list(Path(tmp).rglob("*.strm"))
+            self.assertEqual(len(written), 1)
+            text = written[0].read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("http://192.168.1.9:3000/"))
+            self.assertNotIn("mp.yuanhot.top", text)
+            self.assertIn("pickcode=lolihousecode0001", text)
+
     def test_flatten_does_nothing_when_all_collision(self):
         session = _Fake()
         session.dirs["/inbox"] = [Node("/inbox/show", "show", True)]
@@ -1004,16 +1042,19 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.17")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.18")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
-        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe"):
+        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):
             self.assertNotIn(name, sys.modules)
-        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe"):
+        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):
             self.assertIn(f"app.plugins.anime115.{name}", sys.modules)
         _form, defaults = plugin.Anime115.get_form(None)
-        for key in ("cookie", "offline_dir", "strm_root", "play_base", "storage", "subscribe_source"):
+        for key in ("cookie", "offline_dir", "strm_root", "play_base", "play_base_lan", "strm_for", "storage", "subscribe_source"):
             self.assertIn(key, defaults)
+        self.assertEqual(defaults["strm_for"], "lan")
+        self.assertNotIn("mp.yuanhot.top", defaults["play_base_lan"])
+        self.assertIn("mp.yuanhot.top", defaults["play_base"])
         self.assertEqual(defaults["subscribe_source"], "mp")
         daily = (_ROOT / "__init__.py").read_text().split("def _daily", 1)[1].split("def _prepare_shows", 1)[0]
         self.assertIn("_mp_session", daily)
