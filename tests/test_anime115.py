@@ -29,7 +29,7 @@ from anime115.anime_dmhy import (  # noqa: E402
 )
 from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
 from anime115.anime_jobs import JobConfig, run_daily, run_flatten, run_organize  # noqa: E402
-from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix  # noqa: E402
+from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix, title_matches  # noqa: E402
 from anime115.anime_tmdb import match_tv_id, progress_from_season, resolve_tv_id  # noqa: E402
 
 
@@ -62,6 +62,17 @@ class NamesTest(unittest.TestCase):
         self.assertTrue(shows[0].airing)
         self.assertEqual(shows[0].aliases, ["彼女の友達"])
         self.assertEqual(shows[0].groups, ["今晚月色真美"])
+
+    def test_magical_explorer_traditional_title_matches(self):
+        show = parse_watchlist("魔法★探险家 | マジカル★エクスプローラー | Magical Explorer | tmdb_id=335194 | 连载中")[0]
+        ani = "[ANi] Magical Explorer /  魔法★探險家 - 07 [1080P][Baha][WEB-DL][AAC AVC][CHT][MP4]"
+        loli = "[LoliHouse] 魔法★探险家 / Magical Explorer - 06 [WebRip 1080p HEVC-10bit AAC][简繁内封字幕]"
+        self.assertTrue(title_matches(ani, show))
+        self.assertTrue(title_matches(loli, show))
+        keyword_only = parse_watchlist("魔法★探险家 | tmdb_id=335194 | 连载中")[0]
+        self.assertTrue(title_matches(ani, keyword_only))
+        self.assertTrue(title_matches(loli, keyword_only))
+        self.assertFalse(title_matches("[ANi] 别的节目 - 01 [1080P]", keyword_only))
 
 
 class ScoreTest(unittest.TestCase):
@@ -387,7 +398,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.5")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.6")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb"):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 
@@ -10,6 +11,25 @@ _SEASON_WORD = {
     "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
     "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
 }
+# 繁体到简体，只收简繁成对且不会改成另一个常用字的。用来让「探险家」对上「探險家」。
+_HANT_HANS_PAIRS = (
+    "險险", "學学", "對对", "嬌娇", "東东", "國国", "門门", "開开", "關关", "長长",
+    "電电", "視视", "網网", "語语", "話话", "書书", "畫画", "後后", "從从", "為为",
+    "時时", "間间", "會会", "來来", "這这", "個个", "們们", "說说", "還还", "過过",
+    "發发", "現现", "實实", "與与", "無无", "愛爱", "親亲", "見见", "覺觉", "讓让",
+    "請请", "謝谢", "點点", "頭头", "題题", "風风", "飛飞", "馬马", "體体", "條条",
+    "樂乐", "機机", "氣气", "漢汉", "滿满", "燈灯", "貓猫", "蟲虫", "衛卫", "裡里",
+    "裏里", "麼么", "樣样", "號号", "節节", "級级", "約约", "紅红", "線线", "練练",
+    "組组", "終终", "結结", "給给", "統统", "續续", "義义", "聲声", "聽听", "臉脸",
+    "興兴", "術术", "裝装", "複复", "觀观", "記记", "許许", "設设", "試试", "認认",
+    "識识", "譯译", "議议", "護护", "變变", "貝贝", "賽赛", "轉转", "輕轻", "邊边",
+    "達达", "運运", "選选", "適适", "醫医", "鐵铁", "陽阳", "隊队", "難难", "靈灵",
+    "靜静", "頁页", "預预", "領领", "飯饭", "鬥斗", "龍龙", "龜龟", "雲云", "鐘钟",
+)
+_HANT_TO_HANS = str.maketrans(
+    "".join(pair[0] for pair in _HANT_HANS_PAIRS),
+    "".join(pair[1] for pair in _HANT_HANS_PAIRS),
+)
 
 
 @dataclass
@@ -110,9 +130,30 @@ def join_path(parent: str, name: str) -> str:
 
 
 def title_matches(title: str, show: Show) -> bool:
-    """标题里要出现搜索词或任一别名。"""
-    folded = (title or "").casefold()
-    return any(name.casefold() in folded for name in show.names())
+    """标题里要出现搜索词或任一别名。简繁、星号和空格先折成同一种写法。"""
+    folded = _fold_name(title)
+    for name in show.names():
+        folded_name = _fold_name(name)
+        if folded_name and folded_name in folded:
+            return True
+    return False
+
+
+def _fold_name(text: str) -> str:
+    """去掉空白和符号，并把常见繁体折成简体。拉丁字母按小写比较。"""
+    normalized = unicodedata.normalize("NFKC", text or "").casefold().translate(_HANT_TO_HANS)
+    return "".join(ch for ch in normalized if _kept(ch))
+
+
+def _kept(ch: str) -> bool:
+    if ch.isalnum():
+        return True
+    code = ord(ch)
+    return (
+        0x3040 <= code <= 0x30FF
+        or 0x3400 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+    )
 
 
 def parse_episode(title: str) -> tuple[int, int] | None:
