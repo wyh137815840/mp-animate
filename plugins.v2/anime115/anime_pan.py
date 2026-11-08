@@ -300,25 +300,36 @@ def _task_rows(payload) -> list[dict]:
 
 
 def _from_aps(row: dict, directory_id: str) -> dict:
-    """aps 的目录用 cid 当自己的 id，文件用 fid，文件的 cid 才是父目录。"""
-    if row.get("fid") and not row.get("fc"):
+    """aps 的目录用 cid 当自己的 id。文件有 fid，名字在 n 或 fn。fc 为 0 才是目录。"""
+    name = str(row.get("n") or row.get("fn") or "")
+    fid = str(row.get("fid") or "")
+    cid = str(row.get("cid") or "")
+    is_file = _aps_is_file(row)
+    if is_file:
         return {
-            "fid": str(row.get("fid")),
+            "fid": fid if fid and fid != "0" else cid,
             "fc": "1",
-            "fn": row.get("n") or row.get("fn") or "",
-            "pid": str(row.get("cid") or directory_id),
+            "fn": name,
+            "pid": cid or str(row.get("pid") or directory_id),
             "fs": row.get("s") or row.get("fs") or 0,
             "pc": row.get("pc") or "",
         }
-    if str(row.get("fc")) in {"0", "1"} and row.get("fn"):
-        return row
     return {
-        "fid": str(row.get("cid") or row.get("fid") or ""),
+        "fid": cid or (fid if fid and fid != "0" else ""),
         "fc": "0",
-        "fn": row.get("n") or row.get("fn") or "",
+        "fn": name,
         "pid": str(row.get("pid") or directory_id),
         "pc": row.get("pc") or "",
     }
+
+
+def _aps_is_file(row: dict) -> bool:
+    """fc=0 是目录，哪怕名字以 .mkv 结尾。有 fc=1 或单独的 fid 才是文件。"""
+    fc = row.get("fc")
+    if fc is not None and str(fc) != "":
+        return str(fc) != "0"
+    fid = str(row.get("fid") or "")
+    return bool(fid) and fid != "0"
 
 
 def _id_of(payload) -> str:

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from .anime_dmhy import Pick, SearchOptions, select_shows
 from .anime_flatten import Node, apply_proposals, propose
-from .anime_names import join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix
+from .anime_names import Show, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
 
 
 SUB_EXTS = {".ass", ".srt", ".ssa", ".sup"}
@@ -145,7 +145,7 @@ def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
                 mark = "ok"
             else:
                 skipped += 1
-                mark = "跳过"
+                mark = decision.get("reason") or "跳过"
             _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=index, total=len(work), current=title, result=mark, organized=organized, skipped=skipped, failed=failed)
             continue
         dest_dir = decision["dest_dir"]
@@ -395,6 +395,35 @@ def _task_rows(payload) -> list:
     return []
 
 
+def _is_video_file(item: Node) -> bool:
+    return (not item.is_dir) and _suffix(item.name) in VIDEO_EXTS and "sample" not in item.name.lower()
+
+
+def _videos_for_task(videos: list[Node], task: dict) -> list[Node]:
+    """收件箱里有多包时，只留这一集。同名外壳目录不算视频。"""
+    if len(videos) <= 1:
+        return videos
+    season = int(task.get("season") or 0)
+    episode = int(task.get("episode") or 0)
+    if episode <= 0:
+        return videos
+    matched = []
+    for video in videos:
+        parsed = parse_episode(video.name) or parse_episode(video.path)
+        if parsed is None or parsed[1] != episode:
+            continue
+        if season and parsed[0] != season:
+            continue
+        matched.append(video)
+    if len(matched) <= 1:
+        return matched
+    show = Show(keyword=str(task.get("show") or ""))
+    if not show.keyword:
+        return matched
+    narrowed = [video for video in matched if title_matches(f"{video.path} {video.name}", show)]
+    return narrowed or matched
+
+
 def _task_finished(task: dict) -> bool:
     status = str(task.get("status", task.get("status_text", ""))).strip().lower()
     if status in {"-1", "3", "4", "fail", "failed", "error", "失败"}:
@@ -432,9 +461,16 @@ def _flatten_list(session, root: str, depth: int) -> list[Node]:
 
 
 def _decide_move(task: dict, files: list[Node], library: str) -> dict:
-    videos = [item for item in files if not item.is_dir and _suffix(item.name) in VIDEO_EXTS and "sample" not in item.name.lower()]
+    videos = _videos_for_task(
+        [item for item in files if _is_video_file(item)],
+        task,
+    )
+    if not videos:
+        present = [item for item in files if _is_video_file(item)]
+        reason = "没有视频" if not present else "集数对不上"
+        return {"action": "leave", "reason": reason, "task": task.get("infohash"), "nodes": []}
     if len(videos) != 1:
-        return {"action": "leave", "reason": "uncertain", "task": task.get("infohash"), "nodes": []}
+        return {"action": "leave", "reason": "不止一个视频", "task": task.get("infohash"), "nodes": []}
     video = videos[0]
     parsed = parse_episode(video.name) or parse_episode(task.get("title") or "")
     if parsed is None:
@@ -445,9 +481,13 @@ def _decide_move(task: dict, files: list[Node], library: str) -> dict:
     show = safe_dir_name(task.get("show") or "unknown")
     dest_dir = join_path(join_path(library, show), f"Season {season:02d}")
     stem = video.name.rsplit(".", 1)[0]
+    home = parent_path(video.path)
     sidecars = [
         item for item in files
-        if not item.is_dir and _suffix(item.name) in SUB_EXTS and item.name.rsplit(".", 1)[0] == stem
+        if not item.is_dir
+        and parent_path(item.path) == home
+        and _suffix(item.name) in SUB_EXTS
+        and item.name.rsplit(".", 1)[0] == stem
     ]
     return {
         "action": "move",
