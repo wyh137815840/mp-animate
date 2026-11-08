@@ -12,11 +12,19 @@ from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
+from .anime_config import PLAY_BASE, offline_directory, usable_cookie
 from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
 from .anime_flatten import Node
 from .anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize
 from .anime_names import Show, norm, parse_watchlist
 from .anime_tmdb import live_bounds, shanghai_today
+
+_FORM_NOTE = (
+    "先保持「只预览」。115 Cookie 留空时使用存储 ID 对应的已登录 115，默认 u115。"
+    "strm 目录填这台 Emby 媒体库正在扫描的路径。"
+    "播放地址走 MoviePilot 上已启用的 115网盘STRM助手跳转，填外网域名，不能写 127.0.0.1。"
+    "摊平即使关了预览，也要另开「摊平允许落盘」才会移动。"
+)
 
 
 class Anime115(_PluginBase):
@@ -25,7 +33,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -58,6 +66,9 @@ class Anime115(_PluginBase):
     _move_gap_seconds = 2
     _flatten_max_moves = 30
     _tmdb_api_key = ""
+    _cookie = ""
+    _strm_root = ""
+    _play_base = PLAY_BASE
 
     def init_plugin(self, config: dict = None):
         """读配置。勾了立即运行就跑一次每日任务。"""
@@ -77,7 +88,10 @@ class Anime115(_PluginBase):
         self._daily_cron = str(config.get("daily_cron") or "").strip()
         self._organize_cron = str(config.get("organize_cron") or "").strip()
         self._flatten_cron = str(config.get("flatten_cron") or "").strip()
-        self._offline_root = str(config.get("offline_root") or "/离线下载/动漫").strip()
+        self._offline_root = offline_directory(config)
+        self._cookie = usable_cookie(str(config.get("cookie") or ""))
+        self._strm_root = str(config.get("strm_root") or "").strip()
+        self._play_base = str(config.get("play_base") or PLAY_BASE).strip() or PLAY_BASE
         self._mount_prefix = str(config.get("mount_prefix") or "/115open").strip()
         self._library_root = str(config.get("library_root") or "").strip()
         self._flatten_roots = str(config.get("flatten_roots") or "")
@@ -170,7 +184,7 @@ class Anime115(_PluginBase):
                         "props": {
                             "type": "info",
                             "variant": "tonal",
-                            "text": "使用 MoviePilot 里已经登录的 115，存储 ID 默认 u115。先保持「只预览」。摊平即使关了预览，也要另开「摊平允许落盘」才会移动。",
+                            "text": _FORM_NOTE,
                             "class": "mb-4",
                         },
                     },
@@ -187,10 +201,17 @@ class Anime115(_PluginBase):
                             _field(4, "daily_cron", "每日补磁力", "15 10 * * *，留空则不定时"),
                             _field(4, "organize_cron", "离线整理", "*/30 * * * *，留空则不定时"),
                             _field(4, "flatten_cron", "整包摊平", "15 */2 * * *，留空则不定时"),
-                            _field(4, "storage", "存储", "u115"),
+                            _field(6, "storage", "存储", "MoviePilot 里的 115 存储 ID，默认 u115"),
+                            _area(
+                                "cookie",
+                                "115 Cookie",
+                                "和 115网盘订阅助手一样，填写 UID=...; CID=...; SEID=...; KID=...",
+                            ),
+                            _field(12, "offline_dir", "离线下载目录", "默认 /离线下载/动漫，日期子目录自动加"),
+                            _field(6, "strm_root", "strm 目录", "/media/动漫，这台 Emby 媒体库正在扫描的路径"),
+                            _field(12, "play_base", "播放地址模板", PLAY_BASE),
                             _field(4, "resolution", "分辨率", "1080"),
                             _field(4, "lookback_hours", "回溯小时", "36"),
-                            _field(6, "offline_root", "离线目录", "/离线下载/动漫，日期子目录自动加"),
                             _field(6, "mount_prefix", "挂载前缀", "/115open，只用来剥路径"),
                             _field(6, "library_root", "库根", "/动漫"),
                             _field(6, "fansub_prefer", "优先字幕组", "多个用逗号"),
@@ -217,9 +238,12 @@ class Anime115(_PluginBase):
             "organize_cron": "",
             "flatten_cron": "",
             "storage": "u115",
+            "cookie": "",
+            "offline_dir": "/离线下载/动漫",
+            "strm_root": "",
+            "play_base": PLAY_BASE,
             "resolution": "1080",
             "lookback_hours": 36,
-            "offline_root": "/离线下载/动漫",
             "mount_prefix": "/115open",
             "library_root": "",
             "fansub_prefer": "",
@@ -312,7 +336,7 @@ class Anime115(_PluginBase):
         config.search.bounds_of = live_bounds(self._tmdb_api_key, shanghai_today(moment))
         result = run_daily(
             shows,
-            _Mp115(self._storage, self._cancel),
+            self._session(),
             lambda show: _entries_for(show, self._stopped, gap),
             seen,
             moment,
@@ -327,13 +351,13 @@ class Anime115(_PluginBase):
 
     def _organize(self) -> dict:
         tasks = list(self.get_data("tasks") or [])
-        result = run_organize(tasks, _Mp115(self._storage, self._cancel), self._config())
+        result = run_organize(tasks, self._session(), self._config())
         if not result.get("dry_run") and result.get("ok"):
             self.save_data("tasks", tasks)
         return result
 
     def _flatten(self) -> dict:
-        return run_flatten(_Mp115(self._storage, self._cancel), self._config())
+        return run_flatten(self._session(), self._config())
 
     def _config(self) -> JobConfig:
         prefer = [item.strip() for item in self._fansub_prefer.split(",") if item.strip()]
@@ -365,6 +389,18 @@ class Anime115(_PluginBase):
             move_gap_seconds=self._move_gap_seconds,
             min_episode_mb=self._min_episode_mb,
         )
+
+    def _cookie_value(self) -> str:
+        """填了 UID= 才算 Cookie。留空则调用方改用已登录存储。"""
+        return usable_cookie(getattr(self, "_cookie", ""))
+
+    def _session(self):
+        """Cookie 留空时用存储 ID。填了也不改走开放平台，避免和 u115 不是同一个账号。"""
+        if self._cookie_value():
+            logger.info(f"动漫 115 已填写 115 Cookie。离线、整理和摊平仍使用已登录存储 {self._storage}")
+        else:
+            logger.info(f"动漫 115 未填 115 Cookie，使用已登录存储 {self._storage}")
+        return _Mp115(self._storage, self._cancel)
 
     def _stopped(self) -> bool:
         cancel = getattr(self, "_cancel", None)
@@ -422,6 +458,13 @@ class Anime115(_PluginBase):
             lines.append(f"错误：{data['error']}")
         if data.get("inbox"):
             lines.append(f"目录：{data['inbox']}")
+        if getattr(self, "_strm_root", ""):
+            lines.append(f"strm：{self._strm_root}")
+        lines.append(
+            "115：已填 Cookie，调用用存储 " + self._storage
+            if self._cookie_value()
+            else "115：存储 " + self._storage
+        )
         counts = data.get("counts") or {}
         if counts:
             lines.append(

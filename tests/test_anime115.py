@@ -29,6 +29,7 @@ from anime115.anime_dmhy import (  # noqa: E402
 )
 from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
 from anime115.anime_jobs import JobConfig, run_daily, run_flatten, run_organize  # noqa: E402
+from anime115.anime_config import PLAY_BASE, offline_directory, usable_cookie  # noqa: E402
 from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix, title_matches  # noqa: E402
 from anime115.anime_tmdb import match_tv_id, progress_from_season, resolve_tv_id  # noqa: E402
 
@@ -359,6 +360,18 @@ class TmdbTest(unittest.TestCase):
         self.assertEqual(resolve_tv_id(pinned, lambda _name: []), 316891)
 
 
+class ConfigTest(unittest.TestCase):
+    def test_cookie_and_offline_dir_follow_av_names(self):
+        self.assertEqual(usable_cookie("UID=1; CID=2; SEID=3; KID=4"), "UID=1; CID=2; SEID=3; KID=4")
+        self.assertEqual(usable_cookie("not a cookie"), "")
+        self.assertEqual(usable_cookie(""), "")
+        self.assertEqual(offline_directory({"offline_dir": "/离线下载/动漫"}), "/离线下载/动漫")
+        self.assertEqual(offline_directory({"offline_root": "/旧目录"}), "/旧目录")
+        self.assertEqual(offline_directory({}), "/离线下载/动漫")
+        self.assertIn("pickcode={pickcode}", PLAY_BASE)
+        self.assertNotIn("127.0.0.1", PLAY_BASE)
+
+
 class ImportTest(unittest.TestCase):
     def test_package_import_leaves_no_bare_module(self):
         app = types.ModuleType("app")
@@ -398,13 +411,18 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.6")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.7")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
-        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb"):
+        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config"):
             self.assertNotIn(name, sys.modules)
-        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb"):
+        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config"):
             self.assertIn(f"app.plugins.anime115.{name}", sys.modules)
+        _form, defaults = plugin.Anime115.get_form(None)
+        for key in ("cookie", "offline_dir", "strm_root", "play_base", "storage"):
+            self.assertIn(key, defaults)
+        for key in ("javbus_host", "proxy", "rename_folder", "overwrite", "refresh_emby", "emby_library"):
+            self.assertNotIn(key, defaults)
         self.assertIs(plugin.parse_rss, sys.modules["app.plugins.anime115.anime_dmhy"].parse_rss)
 
 
