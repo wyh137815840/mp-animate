@@ -486,65 +486,78 @@ def _pack_id(path: str, inbox: str) -> str:
 
 
 def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
-    """先锁到这一集的包，包内字幕不算视频，再按集数留下一个正片。"""
+    """名叫 .mkv 的外壳如果里面只有一个正片，就用那个正片。"""
     inbox = task.get("folder") or ""
-    videos = [item for item in files if _is_video_file(item)]
+    videos = _real_videos(files)
     if not videos:
         return []
     season = int(task.get("season") or 0)
     episode = int(task.get("episode") or 0)
-    packs = {}
-    for item in files:
-        packs.setdefault(_pack_id(item.path, inbox), []).append(item)
-    chosen_pack = _pack_for_episode(packs, inbox, season, episode, task.get("show") or "")
-    scoped = [item for item in videos if _pack_id(item.path, inbox) == chosen_pack] if chosen_pack else videos
-    if len(scoped) <= 1:
-        return scoped
     if episode <= 0:
-        return scoped
-    matched = [item for item in scoped if _same_episode(_episode_of_name(item.name), season, episode)]
-    if len(matched) == 1:
-        return matched
-    if matched:
-        return _prefer_show(matched, task.get("show") or "")
-    return scoped
+        return videos
+    grouped: dict[str, list[Node]] = {}
+    for item in videos:
+        grouped.setdefault(_pack_id(item.path, inbox), []).append(item)
+    candidates = []
+    for pack, group in grouped.items():
+        picked = _one_in_pack(pack, group, inbox, season, episode)
+        if picked is not None:
+            candidates.append(picked)
+    if len(candidates) == 1:
+        return candidates
+    titled = [item for item in candidates if _title_hits(item, task)]
+    if len(titled) == 1:
+        return titled
+    if candidates:
+        return candidates
+    named = [item for item in videos if _same_episode(_episode_of_name(item.name), season, episode)]
+    if len(named) == 1:
+        return named
+    return named or videos
+
+
+def _real_videos(files: list[Node]) -> list[Node]:
+    """外壳路径下面还有文件时，外壳自己不算视频。"""
+    paths = [norm(item.path) for item in files]
+    found = []
+    for item in files:
+        if not _is_video_file(item):
+            continue
+        prefix = norm(item.path) + "/"
+        if any(path.startswith(prefix) for path in paths):
+            continue
+        found.append(item)
+    return found
+
+
+def _one_in_pack(pack: str, group: list[Node], inbox: str, season: int, episode: int) -> Node | None:
+    if pack == norm(inbox):
+        named = [item for item in group if _same_episode(_episode_of_name(item.name), season, episode)]
+        return named[0] if len(named) == 1 else None
+    if len(group) == 1 and (
+        _same_episode(_episode_of_name(name_of(pack)), season, episode)
+        or _same_episode(_episode_of_name(group[0].name), season, episode)
+    ):
+        return group[0]
+    named = [item for item in group if _same_episode(_episode_of_name(item.name), season, episode)]
+    if len(named) == 1:
+        return named[0]
+    return None
+
+
+def _title_hits(video: Node, task: dict) -> bool:
+    title = str(task.get("title") or "")
+    blob = f"{video.path} {video.name}"
+    if title and (title_matches(blob, Show(keyword=title)) or title_matches(title, Show(keyword=video.name))):
+        return True
+    show = str(task.get("show") or "")
+    return bool(show) and title_matches(blob, Show(keyword=show))
 
 
 def _same_episode(parsed: tuple[int, int] | None, season: int, episode: int) -> bool:
     if parsed is None or parsed[1] != episode:
         return False
     return not season or parsed[0] == season
-
-
-def _pack_for_episode(packs: dict, inbox: str, season: int, episode: int, show: str) -> str:
-    if episode <= 0:
-        return ""
-    found = []
-    for pack, items in packs.items():
-        if pack == norm(inbox):
-            continue
-        label = name_of(pack)
-        if _same_episode(_episode_of_name(label), season, episode):
-            found.append(pack)
-            continue
-        for item in items:
-            if _is_video_file(item) and _same_episode(_episode_of_name(item.name), season, episode):
-                found.append(pack)
-                break
-    if len(found) == 1:
-        return found[0]
-    if show and len(found) > 1:
-        narrowed = [pack for pack in found if title_matches(pack, Show(keyword=show))]
-        if len(narrowed) == 1:
-            return narrowed[0]
-    return ""
-
-
-def _prefer_show(videos: list[Node], show: str) -> list[Node]:
-    if not show:
-        return videos
-    narrowed = [video for video in videos if title_matches(f"{video.path} {video.name}", Show(keyword=show))]
-    return narrowed or videos
 
 
 def _task_finished(task: dict) -> bool:
@@ -590,7 +603,8 @@ def _decide_move(task: dict, files: list[Node], library: str) -> dict:
         reason = "没有视频" if not present else "集数对不上"
         return {"action": "leave", "reason": reason, "task": task.get("infohash"), "nodes": []}
     if len(videos) != 1:
-        return {"action": "leave", "reason": "不止一个视频", "task": task.get("infohash"), "nodes": []}
+        listed = "、".join(item.name for item in videos[:8])
+        return {"action": "leave", "reason": f"不止一个视频：{listed}", "task": task.get("infohash"), "nodes": []}
     video = videos[0]
     parsed = parse_episode(video.name) or parse_episode(task.get("title") or "")
     if parsed is None:

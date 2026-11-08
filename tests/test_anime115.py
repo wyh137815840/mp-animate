@@ -317,7 +317,9 @@ class JobTest(unittest.TestCase):
         ]
         tasks = [{"infohash": HASH, "show": "佐藤同学", "season": 1, "episode": 1, "title": "x", "folder": "/box", "status": "submitted"}]
         result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
-        self.assertEqual(result["moves"][0]["reason"], "不止一个视频")
+        self.assertTrue(result["moves"][0]["reason"].startswith("不止一个视频："))
+        self.assertIn("佐藤同学 - 01 [a].mkv", result["moves"][0]["reason"])
+        self.assertIn("佐藤同学 - 01 [b].mkv", result["moves"][0]["reason"])
         self.assertEqual(session.moves, [])
 
     def test_organize_unwraps_same_name_pack(self):
@@ -440,6 +442,38 @@ class JobTest(unittest.TestCase):
         self.assertEqual(result["moves"][0]["action"], "move")
         self.assertEqual(result["moves"][0]["name"], video)
         self.assertEqual(result["moves"][0]["reason"], "ok")
+
+    def test_mkv_shell_listed_as_file_still_uses_inner_video(self):
+        session = _Fake()
+        session.offline = [{"info_hash": HASH, "status": 2}]
+        shell = "/inbox/[LoliHouse] 佐藤同学 - 02 [WebRip].mkv"
+        video = "[LoliHouse] 佐藤同学 - 02 [WebRip].mkv"
+        session.dirs["/inbox"] = [
+            Node(shell, video, True),
+            Node(shell, video, False, 100),
+            Node("/inbox/[LoliHouse] 佐藤同学 - 04 [WebRip].mkv", "[LoliHouse] 佐藤同学 - 04 [WebRip].mkv", True),
+        ]
+        session.dirs[shell] = [
+            Node(f"{shell}/{video}", video, False, 900 * 1024 * 1024),
+            Node(f"{shell}/[LoliHouse] 佐藤同学 - 02 [WebRip].chs.ass", "[LoliHouse] 佐藤同学 - 02 [WebRip].chs.ass", False, 1000),
+            Node(f"{shell}/[LoliHouse] 佐藤同学 - 02 [WebRip].cht.srt", "[LoliHouse] 佐藤同学 - 02 [WebRip].cht.srt", False, 1000),
+        ]
+        session.dirs["/inbox/[LoliHouse] 佐藤同学 - 04 [WebRip].mkv"] = [
+            Node("/inbox/[LoliHouse] 佐藤同学 - 04 [WebRip].mkv/[LoliHouse] 佐藤同学 - 04 [WebRip].mkv", "[LoliHouse] 佐藤同学 - 04 [WebRip].mkv", False, 900 * 1024 * 1024),
+        ]
+        tasks = [{
+            "infohash": HASH,
+            "show": "佐藤同学",
+            "season": 1,
+            "episode": 2,
+            "title": "[LoliHouse] 佐藤同学 - 02 [WebRip]",
+            "folder": "/inbox",
+            "status": "submitted",
+        }]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertEqual(result["moves"][0]["action"], "move")
+        self.assertEqual(result["moves"][0]["name"], video)
+        self.assertNotIn("不止一个视频", result["moves"][0]["reason"])
 
     def test_flatten_does_nothing_when_all_collision(self):
         session = _Fake()
@@ -608,7 +642,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.12")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.13")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress"):
