@@ -57,6 +57,24 @@ class ScoreTest(unittest.TestCase):
         self.assertEqual(torrents[0].infohash, HASH)
         self.assertEqual(torrents[0].size, 900000000)
 
+    def test_rss_base32_btih(self):
+        xml = """<?xml version="1.0"?>
+        <rss><channel>
+          <item>
+            <title>佐藤同学 - 03</title>
+            <enclosure url="magnet:?xt=urn:btih:J4Q3TVSKPLVJYLI3NP5EUNXWP736FSBF&amp;dn=show"/>
+          </item>
+          <item>
+            <title>佐藤同学 - 04</title>
+            <enclosure url="magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"/>
+          </item>
+        </channel></rss>"""
+        torrents = parse_rss(xml)
+        self.assertEqual(
+            [item.infohash for item in torrents],
+            ["4f21b9d64a7aea9c2d1b6bfa4a36f67ff7e2c825", "b" * 40],
+        )
+
 
 class FlattenTest(unittest.TestCase):
     def test_same_name_lift_and_collision_gate(self):

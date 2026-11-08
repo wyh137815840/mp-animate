@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ from anime_names import Show, parse_episode, title_matches
 _BATCH = re.compile(r"合集|全集|整季|batch|\bFin\b|BDrip|BDRip", re.IGNORECASE)
 _RAW = re.compile(r"生肉|\bRAW\b", re.IGNORECASE)
 _UHD = re.compile(r"2160|4K", re.IGNORECASE)
-_HASH = re.compile(r"btih:([0-9a-fA-F]{40})")
+_BTIH = re.compile(r"btih:([0-9a-fA-F]{40}|[A-Za-z2-7]{32})", re.IGNORECASE)
 _SIZE = re.compile(r"([\d.]+)\s*(GB|MB|KB|GiB|MiB)", re.IGNORECASE)
 _UNIT = {"KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3, "KIB": 1024, "MIB": 1024 ** 2, "GIB": 1024 ** 3}
 
@@ -68,7 +69,7 @@ def fetch_rss(keyword: str, timeout: int = 20) -> bytes:
 
 
 def parse_rss(payload: bytes | str) -> list[Torrent]:
-    """从 RSS XML 取出磁力。没有 40 位 infohash 的条目丢掉。"""
+    """从 RSS XML 取出磁力。认不出 infohash 的条目丢掉。"""
     if isinstance(payload, str):
         payload = payload.encode("utf-8")
     root = ET.fromstring(payload)
@@ -83,7 +84,7 @@ def parse_rss(payload: bytes | str) -> list[Torrent]:
             size = _int(enclosure.attrib.get("length"))
         if not magnet:
             description = _text(item, "description")
-            matched = _HASH.search(description)
+            matched = _BTIH.search(description)
             magnet = f"magnet:?xt=urn:btih:{matched.group(1)}" if matched else ""
             if not size:
                 size = _size_in_text(description)
@@ -200,8 +201,20 @@ def _too_old(published: datetime, now: datetime, hours: int) -> bool:
 
 
 def _infohash(magnet: str) -> str:
-    matched = _HASH.search(magnet or "")
-    return matched.group(1).lower() if matched else ""
+    """40 位 hex 直接小写。32 位 base32 先解码成 20 字节再转 hex。"""
+    matched = _BTIH.search(magnet or "")
+    if not matched:
+        return ""
+    token = matched.group(1)
+    if len(token) == 40:
+        return token.lower()
+    try:
+        raw = base64.b32decode(token.upper())
+    except Exception:
+        return ""
+    if len(raw) != 20:
+        return ""
+    return raw.hex()
 
 
 def _published(value: str) -> datetime | None:
