@@ -3,12 +3,13 @@
     "name": "动漫 115",
     "description": "从动漫花园补连载磁力，用 MoviePilot 已登录的 115 离线，并在安全时摊平整包。",
     "labels": "动漫,115网盘",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "Moviepilot_A.png",
     "author": "local",
     "level": 1,
     "system_version": ">=2.0.0,<3",
     "history": {
+      "v1.0.2": "拉动漫花园 RSS 时优先使用 MoviePilot 系统代理 settings.PROXY_HOST。",
       "v1.0.1": "动漫花园磁力的 btih 支持 32 位 base32，解码成 hex 后再去重。",
       "v1.0.0": "每日从动漫花园选连载磁力，提交到已登录的 115 离线目录；离线完成后整理进季目录；整包摊平先预览，没有安全移动就不改文件。"
     }

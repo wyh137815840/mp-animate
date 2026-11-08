@@ -9,7 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins.v2" / "anime115"))
 
-from anime_dmhy import SearchOptions, Torrent, parse_rss, select_one
+from urllib.request import ProxyHandler
+
+from anime_dmhy import SearchOptions, Torrent, moviepilot_proxy, normalize_proxy, parse_rss, rss_opener, select_one
 from anime_flatten import Node, apply_proposals, propose
 from anime_jobs import JobConfig, run_daily, run_flatten, run_organize
 from anime_names import parse_episode, parse_watchlist, strip_mount_prefix
@@ -74,6 +76,17 @@ class ScoreTest(unittest.TestCase):
             [item.infohash for item in torrents],
             ["4f21b9d64a7aea9c2d1b6bfa4a36f67ff7e2c825", "b" * 40],
         )
+
+    def test_rss_opener_uses_proxy_then_direct(self):
+        proxied = rss_opener("http://proxy.example:7900")
+        handlers = [item for item in proxied.handlers if isinstance(item, ProxyHandler)]
+        self.assertEqual(handlers[0].proxies.get("https"), "http://proxy.example:7900")
+        self.assertEqual(handlers[0].proxies.get("http"), "http://proxy.example:7900")
+        direct = rss_opener("")
+        direct_handlers = [item for item in direct.handlers if isinstance(item, ProxyHandler)]
+        self.assertTrue(all(not item.proxies for item in direct_handlers))
+        self.assertEqual(normalize_proxy("proxy.example:7900"), "http://proxy.example:7900")
+        self.assertEqual(moviepilot_proxy(), "")
 
 
 class FlattenTest(unittest.TestCase):

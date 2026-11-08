@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 from anime_names import Show, parse_episode, title_matches
 
@@ -59,13 +59,54 @@ class Pick:
 
 
 def fetch_rss(keyword: str, timeout: int = 20) -> bytes:
-    """拉取动漫花园动画分类的 RSS。"""
+    """拉取动漫花园动画分类的 RSS。已配置系统代理时走代理，否则直连。"""
+    proxy = moviepilot_proxy()
     url = "https://share.dmhy.org/topics/rss/sort_id/2/rss.xml?keyword=" + quote(keyword or "")
     request = Request(url, headers={"User-Agent": "MoviePilot-Anime115"})
-    with urlopen(request, timeout=timeout) as response:
+    _log("动漫花园 RSS 经系统代理拉取" if proxy else "动漫花园 RSS 直连拉取")
+    with rss_opener(proxy).open(request, timeout=timeout) as response:
         if getattr(response, "status", 200) != 200:
             raise RuntimeError(f"动漫花园返回 {response.status}")
         return response.read()
+
+
+def moviepilot_proxy() -> str:
+    """读取 MoviePilot 的系统代理。没有安装宿主或没填时返回空字符串。"""
+    try:
+        from app.core.config import settings
+    except Exception:
+        return ""
+    configured = getattr(settings, "PROXY", None)
+    if isinstance(configured, dict):
+        host = configured.get("https") or configured.get("http") or ""
+        if str(host).strip():
+            return normalize_proxy(str(host))
+    return normalize_proxy(str(getattr(settings, "PROXY_HOST", "") or ""))
+
+
+def normalize_proxy(value: str) -> str:
+    """补上缺失的 http 协议。空字符串保持直连。"""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        return "http://" + text
+    return text
+
+
+def rss_opener(proxy: str):
+    """有代理时 http/https 都走它。没有代理时不使用环境变量里的代理。"""
+    if proxy:
+        return build_opener(ProxyHandler({"http": proxy, "https": proxy}))
+    return build_opener(ProxyHandler({}))
+
+
+def _log(message: str) -> None:
+    try:
+        from app.log import logger
+    except Exception:
+        return
+    logger.info(message)
 
 
 def parse_rss(payload: bytes | str) -> list[Torrent]:

@@ -21,6 +21,8 @@ MoviePilot V2 插件。从动漫花园给追更名单补磁力，提交到 Movie
 
 定时留空就只手动运行。打开「保存后立即跑一次每日任务」，或调用 `POST /api/v1/plugin/Anime115/run`。
 
+动漫花园走 MoviePilot 系统设置里的代理（`PROXY_HOST`）。没填就直连。容器里直连若出现 `SSL: UNEXPECTED_EOF_WHILE_READING`，把代理填进 MoviePilot，不要改插件代码。日志里会写「经系统代理拉取」或「直连拉取」。
+
 ## 测试
 
 ```powershell
