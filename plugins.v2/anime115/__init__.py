@@ -19,6 +19,7 @@ from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse
 from .anime_flatten import Node
 from .anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize, run_strm as write_library_strm
 from .anime_names import Show, norm, parse_watchlist
+from .anime_subscribe import load_mp_subscriptions, shows_from_subscriptions
 from .anime_tmdb import live_bounds, shanghai_today
 
 _FORM_NOTE = (
@@ -26,6 +27,7 @@ _FORM_NOTE = (
     "留空或没有 UID= 时使用存储 ID 对应的已登录 115，默认 u115。"
     "strm 目录填这台 Emby 媒体库正在扫描的路径。整理成功后按季目录写 strm，不写 nfo。"
     "已经在库里的文件用 job=strm 补 strm，不移动。播放地址走 MoviePilot 上已启用的 115网盘STRM助手跳转，填外网域名，不能写 127.0.0.1。"
+    "每日默认从 MoviePilot 订阅里只挑动漫去花园搜。电视剧和电影不搜。离线提交走已登录的存储，不使用 P115Client。"
     "摊平即使关了预览，也要另开「摊平允许落盘」才会移动。"
 )
 
@@ -36,7 +38,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.15"
+    plugin_version = "1.0.16"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -57,6 +59,7 @@ class Anime115(_PluginBase):
     _library_root = ""
     _flatten_roots = ""
     _watchlist = ""
+    _subscribe_source = "mp"
     _fansub_prefer = ""
     _resolution = "1080"
     _require_sub = True
@@ -99,6 +102,7 @@ class Anime115(_PluginBase):
         self._library_root = str(config.get("library_root") or "").strip()
         self._flatten_roots = str(config.get("flatten_roots") or "")
         self._watchlist = str(config.get("watchlist") or "")
+        self._subscribe_source = _subscribe_source(config.get("subscribe_source"))
         self._fansub_prefer = str(config.get("fansub_prefer") or "")
         self._resolution = str(config.get("resolution") or "1080").strip() or "1080"
         self._require_sub = bool(config.get("require_sub", True))
@@ -218,7 +222,8 @@ class Anime115(_PluginBase):
                             _field(6, "mount_prefix", "挂载前缀", "/115open，只用来剥路径"),
                             _field(6, "library_root", "库根", "/动漫"),
                             _field(6, "fansub_prefer", "优先字幕组", "多个用逗号"),
-                            _area("watchlist", "追更，每行一部", "剧名 | 别名 | group=字幕组 | tmdb_id=编号 | 连载中"),
+                            _field(6, "subscribe_source", "订阅来源", "mp=从 MP 订阅读取，watchlist=只读追更框，both=两边"),
+                            _area("watchlist", "追更，每行一部", "来源不是 mp 时才用。剧名 | 别名 | group=字幕组 | tmdb_id=编号 | 连载中"),
                             _field(6, "tmdb_api_key", "TMDB API Key", "v3 密钥，留空则用 MoviePilot 的 TMDB_API_KEY", secret=True),
                             _area("flatten_roots", "摊平目录，每行一个", "/离线下载/动漫"),
                             _field(3, "min_episode_mb", "最小体积(MB)", "80"),
@@ -250,6 +255,7 @@ class Anime115(_PluginBase):
             "mount_prefix": "/115open",
             "library_root": "",
             "fansub_prefer": "",
+            "subscribe_source": "mp",
             "watchlist": "",
             "tmdb_api_key": "",
             "flatten_roots": "",
@@ -363,7 +369,33 @@ class Anime115(_PluginBase):
             self._lock.release()
 
     def _daily(self) -> dict:
-        shows = parse_watchlist(self._watchlist)
+        prepared = self._prepare_shows()
+        if prepared.get("error"):
+            return {
+                "ok": False,
+                "error": prepared["error"],
+                "dry_run": self._dry_run,
+                "picks": [],
+                "notes": prepared.get("skipped") or [],
+                "submitted": [],
+                "subscribes": [],
+                "subscribe_source": prepared.get("source") or self._subscribe_source,
+                "anime_count": 0,
+            }
+        shows = prepared["shows"]
+        skipped = prepared["skipped"]
+        if not shows:
+            return {
+                "ok": bool(skipped),
+                "error": "" if skipped else "没有动漫订阅",
+                "dry_run": self._dry_run,
+                "picks": [],
+                "notes": skipped,
+                "submitted": [],
+                "subscribes": [],
+                "subscribe_source": prepared["source"],
+                "anime_count": 0,
+            }
         seen = self.get_data("seen") or {}
         tasks = list(self.get_data("tasks") or [])
         moment = datetime.now().astimezone()
@@ -372,19 +404,67 @@ class Anime115(_PluginBase):
         config.search.bounds_of = live_bounds(self._tmdb_api_key, shanghai_today(moment))
         result = run_daily(
             shows,
-            self._session(),
+            self._mp_session(),
             lambda show: _entries_for(show, self._stopped, gap),
             seen,
             moment,
             config,
             report=self._report,
         )
+        result["notes"] = skipped + (result.get("notes") or [])
+        result["subscribes"] = [
+            {"show": show.keyword, "tmdb_id": show.tmdb_id, "season": show.season}
+            for show in shows
+        ]
+        result["subscribe_source"] = prepared["source"]
+        result["anime_count"] = len(shows)
         if not result.get("dry_run") and result.get("ok"):
             self.save_data("seen", seen)
             for row in result.get("submitted") or []:
                 tasks.append(new_task(row, result.get("inbox") or "", moment))
             self.save_data("tasks", tasks)
         return result
+
+    def _prepare_shows(self) -> dict:
+        """默认只读 MoviePilot 订阅，并且先滤成动漫。"""
+        source = _subscribe_source(self._subscribe_source)
+        skipped = []
+        mp_shows = []
+        if source in {"mp", "both"}:
+            try:
+                rows = load_mp_subscriptions()
+            except Exception as exc:
+                return {"error": f"读不到 MoviePilot 订阅：{exc}", "source": source, "skipped": []}
+            mp_shows, skipped = shows_from_subscriptions(rows, genres_of=self._genre_lookup())
+        manual = parse_watchlist(self._watchlist) if source in {"watchlist", "both"} else []
+        if source == "watchlist":
+            shows = manual
+        elif source == "both":
+            shows = _merge_shows(mp_shows, manual)
+        else:
+            shows = mp_shows
+        return {"shows": shows, "skipped": skipped, "source": source}
+
+    def _genre_lookup(self):
+        """TMDB 电视剧没有分类时，用类型 16 判断是不是动画。查不到就不搜。"""
+        from .anime_tmdb import configured_tmdb_key, tv_genre_ids
+
+        key = configured_tmdb_key(self._tmdb_api_key)
+        cache: dict[int, list[int] | None] = {}
+
+        def lookup(tmdb_id: int):
+            if not key:
+                return None
+            if tmdb_id not in cache:
+                cache[tmdb_id] = tv_genre_ids(tmdb_id, key)
+            return cache[tmdb_id]
+
+        return lookup
+
+    def _mp_session(self):
+        """每日离线走 MoviePilot 已登录的 115，不建 P115Client。"""
+        logger.info(f"动漫 115 每日离线使用已登录存储 {self._storage}")
+        return _Mp115(self._storage, self._cancel)
 
     def _organize(self) -> dict:
         tasks = list(self.get_data("tasks") or [])
@@ -522,6 +602,8 @@ class Anime115(_PluginBase):
         ]
         if data.get("error"):
             lines.append(f"错误：{data['error']}")
+        if data.get("subscribe_source"):
+            lines.append(f"订阅：{data.get('subscribe_source')}，动漫 {int(data.get('anime_count') or 0)}")
         if data.get("inbox"):
             lines.append(f"目录：{data['inbox']}")
         if getattr(self, "_strm_root", ""):
@@ -687,6 +769,25 @@ def _area(model: str, label: str, placeholder: str) -> dict:
             "props": {"model": model, "label": label, "placeholder": placeholder, "rows": 4},
         }],
     }
+
+
+def _subscribe_source(value) -> str:
+    text = str(value or "mp").strip().lower()
+    if text in {"mp", "watchlist", "both"}:
+        return text
+    return "mp"
+
+
+def _merge_shows(primary: list, extra: list) -> list:
+    found = []
+    seen = set()
+    for show in [*primary, *extra]:
+        key = (show.tmdb_id or 0, show.season or 0, show.keyword)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(show)
+    return found
 
 
 def _as_int(value, default: int) -> int:

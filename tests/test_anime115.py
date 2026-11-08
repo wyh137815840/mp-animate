@@ -36,7 +36,8 @@ from anime115.anime_jobs import _finished_hashes  # noqa: E402
 from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix, title_matches  # noqa: E402
 from anime115.anime_pan import CookieSession, Pan115  # noqa: E402
 from anime115.anime_progress import advance, format_progress, format_state  # noqa: E402
-from anime115.anime_tmdb import match_tv_id, progress_from_season, resolve_tv_id  # noqa: E402
+from anime115.anime_subscribe import shows_from_subscriptions  # noqa: E402
+from anime115.anime_tmdb import genre_ids_in, match_tv_id, progress_from_season, resolve_tv_id  # noqa: E402
 
 
 NOW = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
@@ -743,6 +744,75 @@ class JobTest(unittest.TestCase):
         self.assertEqual(session.moves, [])
 
 
+class SubscribeTest(unittest.TestCase):
+    def test_only_anime_subscriptions_are_searched(self):
+        rows = [
+            {"name": "权力的游戏", "type": "电视剧", "tmdbid": 1399, "state": "R", "genre_ids": [18, 10765]},
+            {"name": "魔法★探险家", "type": "电视剧", "tmdbid": 335194, "state": "R", "genre_ids": [16, 35]},
+            {"name": "某电影", "type": "电影", "tmdbid": 11, "state": "R", "genre_ids": [16]},
+            {"name": "来自 Bangumi", "type": "电视剧", "bangumiid": 123, "media_source": "bangumi", "state": "N"},
+            {"name": "分类日番", "type": "电视剧", "media_category": "日番", "state": "R"},
+            {"name": "暂停的番", "type": "电视剧", "bangumiid": 9, "state": "S"},
+            {"name": "没有类型", "type": "电视剧", "tmdbid": 42, "state": "R"},
+        ]
+
+        def genres_of(tmdb_id):
+            if tmdb_id == 42:
+                return None
+            raise AssertionError(tmdb_id)
+
+        shows, notes = shows_from_subscriptions(rows, genres_of)
+        keywords = [show.keyword for show in shows]
+        self.assertEqual(keywords, ["魔法★探险家", "来自 Bangumi", "分类日番"])
+        reasons = {item["show"]: item["reason"] for item in notes}
+        self.assertEqual(reasons["权力的游戏"], "不是动画")
+        self.assertEqual(reasons["某电影"], "电影")
+        self.assertEqual(reasons["暂停的番"], "未在订阅")
+        self.assertEqual(reasons["没有类型"], "无法确认是动画")
+        looked = []
+
+        def entries(show):
+            looked.append(show.keyword)
+            title = f"{show.keyword} - 03 [1080p][简体]"
+            return [Torrent(title, HASH, f"magnet:?xt=urn:btih:{HASH}", 900 * 1024 * 1024, NOW)]
+
+        result = run_daily(shows, _Fake(), entries, {}, NOW, JobConfig(dry_run=True))
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(looked, keywords)
+        self.assertEqual({item["show"] for item in result["picks"]}, set(keywords))
+        self.assertNotIn("权力的游戏", looked)
+
+    def test_tmdb_lookup_keeps_animation_and_drops_drama(self):
+        rows = [
+            {"name": "冷淡的佐藤同学只对我撒娇", "type": "电视剧", "tmdbid": 316891, "state": "R", "keyword": "佐藤同学"},
+            {"name": "普通美剧", "type": "电视剧", "tmdbid": 1399, "state": "R"},
+        ]
+
+        def genres_of(tmdb_id):
+            return [16] if tmdb_id == 316891 else [18]
+
+        shows, notes = shows_from_subscriptions(rows, genres_of)
+        self.assertEqual(len(shows), 1)
+        self.assertEqual(shows[0].keyword, "佐藤同学")
+        self.assertEqual(shows[0].aliases, ["冷淡的佐藤同学只对我撒娇"])
+        self.assertTrue(shows[0].airing)
+        self.assertEqual(notes[0]["reason"], "不是动画")
+        self.assertEqual(genre_ids_in({"genres": [{"id": 16, "name": "动画"}]}), [16])
+
+    def test_subscribed_season_is_not_mixed(self):
+        show = shows_from_subscriptions([
+            {"name": "日番剧", "type": "电视剧", "media_category": "日番", "season": 2, "state": "R"},
+        ])[0][0]
+        torrents = [
+            Torrent("日番剧 - 03 [1080p][简体]", HASH, f"magnet:?xt=urn:btih:{HASH}", 900 * 1024 * 1024, NOW),
+            Torrent("日番剧 S02E03 [1080p][简体]", "b" * 40, "magnet:?xt=urn:btih:" + "b" * 40, 900 * 1024 * 1024, NOW),
+        ]
+        picks, notes = select_one(show, torrents, SearchOptions(), NOW)
+        self.assertEqual(len(picks), 1)
+        self.assertEqual(picks[0].season, 2)
+        self.assertEqual(notes[0]["reason"], "季数不对")
+
+
 class TmdbTest(unittest.TestCase):
     def test_season_progress_uses_air_dates(self):
         payload = {
@@ -895,16 +965,21 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.15")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.16")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
-        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm"):
+        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe"):
             self.assertNotIn(name, sys.modules)
-        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm"):
+        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe"):
             self.assertIn(f"app.plugins.anime115.{name}", sys.modules)
         _form, defaults = plugin.Anime115.get_form(None)
-        for key in ("cookie", "offline_dir", "strm_root", "play_base", "storage"):
+        for key in ("cookie", "offline_dir", "strm_root", "play_base", "storage", "subscribe_source"):
             self.assertIn(key, defaults)
+        self.assertEqual(defaults["subscribe_source"], "mp")
+        daily = (_ROOT / "__init__.py").read_text().split("def _daily", 1)[1].split("def _prepare_shows", 1)[0]
+        self.assertIn("_mp_session", daily)
+        self.assertNotIn("P115Client", daily)
+        self.assertNotIn("CookieSession", daily)
         for key in ("javbus_host", "proxy", "rename_folder", "overwrite", "refresh_emby", "emby_library"):
             self.assertNotIn(key, defaults)
         self.assertIs(plugin.parse_rss, sys.modules["app.plugins.anime115.anime_dmhy"].parse_rss)

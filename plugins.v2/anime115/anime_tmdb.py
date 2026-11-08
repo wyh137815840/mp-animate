@@ -132,6 +132,39 @@ def live_bounds(api_key: str, today: date):
     return bounds
 
 
+def genre_ids_in(payload: dict | None) -> list[int]:
+    """从 TMDB 电视剧详情里取出 genre id。动画是 16。"""
+    if not isinstance(payload, dict):
+        return []
+    found = []
+    for item in [*(payload.get("genre_ids") or []), *(payload.get("genres") or [])]:
+        if isinstance(item, int):
+            found.append(item)
+            continue
+        if isinstance(item, str) and item.strip().isdigit():
+            found.append(int(item.strip()))
+            continue
+        if isinstance(item, dict):
+            try:
+                found.append(int(item.get("id")))
+            except (TypeError, ValueError):
+                continue
+    return found
+
+
+def tv_genre_ids(tv_id: int, api_key: str) -> list[int] | None:
+    """查一部电视剧的类型。请求失败时返回空，调用方不要当成普通剧。"""
+    payload = _fetch_json(f"/3/tv/{int(tv_id)}", {}, api_key)
+    if payload is None:
+        return None
+    return genre_ids_in(payload)
+
+
+def configured_tmdb_key(plugin_key: str = "") -> str:
+    """插件密钥优先，否则用 MoviePilot 的 TMDB_API_KEY。"""
+    return (plugin_key or "").strip() or _settings_key()
+
+
 def _search(name: str, api_key: str) -> list[dict]:
     payload = _fetch_json("/3/search/tv", {"query": name}, api_key)
     rows = (payload or {}).get("results") or []

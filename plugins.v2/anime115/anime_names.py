@@ -41,6 +41,7 @@ class Show:
     groups: list[str] = field(default_factory=list)
     tmdb_id: int | None = None
     airing: bool = False
+    season: int | None = None
 
     def names(self) -> list[str]:
         """搜索词和别名，长的排前面，避免短别名先命中。"""

@@ -207,6 +207,9 @@ def select_one(
             notes.append({"show": show.keyword, "title": torrent.title, "reason": "集数不确定"})
             continue
         season, episode = parsed
+        if show.season and season != show.season:
+            notes.append({"show": show.keyword, "title": torrent.title, "reason": "季数不对"})
+            continue
         progress = options.bounds_of(show, season) if options.bounds_of else None
         if progress is not None:
             count, last_aired = progress
