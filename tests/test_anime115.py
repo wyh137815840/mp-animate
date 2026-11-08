@@ -30,7 +30,9 @@ from anime115.anime_dmhy import (  # noqa: E402
 from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
 from anime115.anime_jobs import JobConfig, run_daily, run_flatten, run_organize  # noqa: E402
 from anime115.anime_config import PLAY_BASE, offline_directory, usable_cookie  # noqa: E402
+from anime115.anime_jobs import _finished_hashes  # noqa: E402
 from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix, title_matches  # noqa: E402
+from anime115.anime_pan import CookieSession, Pan115  # noqa: E402
 from anime115.anime_tmdb import match_tv_id, progress_from_season, resolve_tv_id  # noqa: E402
 
 
@@ -372,6 +374,36 @@ class ConfigTest(unittest.TestCase):
         self.assertNotIn("127.0.0.1", PLAY_BASE)
 
 
+class CookiePanTest(unittest.TestCase):
+    def test_cookie_session_lists_moves_and_adds_without_open_api(self):
+        pan = _FakePan()
+        session = CookieSession("UID=9_1; CID=2; SEID=3; KID=4", None, pan)
+        self.assertTrue(session.check_login())
+        folder = session.ensure_dir("/离线下载/动漫")
+        self.assertEqual(folder.fileid, "11")
+        nodes = session.list_dir("/离线下载/动漫")
+        self.assertEqual(nodes[0].name, "E01.mkv")
+        self.assertTrue(session.move(nodes[0], "/动漫/佐藤同学/Season 01", "E01.mkv"))
+        self.assertEqual(pan.moved, [("81", "21")])
+        added = session.add_offline("magnet:?xt=urn:btih:" + "a" * 40, "11")
+        self.assertTrue(added["state"])
+        self.assertEqual(pan.client.added["wp_path_id"], "11")
+        self.assertEqual(_finished_hashes(session), {"ab" * 20})
+        self.assertTrue(session.delete_dir("/离线下载/动漫/empty"))
+        self.assertEqual(pan.deleted, [("31", "11")])
+        self.assertEqual(session.quota(), {"data": {}})
+
+    def test_directory_walk_uses_aps_and_app_folder_api(self):
+        http = _ScriptedHttp([
+            ("0", [{"cid": "10", "n": "离线下载", "pid": "0"}]),
+            ("10", [{"cid": "11", "n": "动漫", "pid": "10"}]),
+        ])
+        pan = Pan115("UID=9_1; CID=2", http=http, gap=0, client_factory=lambda _cookie: _FakeClient())
+        self.assertEqual(pan.ensure_dir("/离线下载/动漫"), "11")
+        self.assertTrue(any(call[1].startswith("https://aps.115.com/natsort/files.php") for call in http.calls))
+        self.assertFalse(any("/open/" in call[1] for call in http.calls))
+
+
 class ImportTest(unittest.TestCase):
     def test_package_import_leaves_no_bare_module(self):
         app = types.ModuleType("app")
@@ -411,12 +443,12 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.7")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.8")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
-        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config"):
+        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan"):
             self.assertNotIn(name, sys.modules)
-        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config"):
+        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan"):
             self.assertIn(f"app.plugins.anime115.{name}", sys.modules)
         _form, defaults = plugin.Anime115.get_form(None)
         for key in ("cookie", "offline_dir", "strm_root", "play_base", "storage"):
@@ -424,6 +456,82 @@ class ImportTest(unittest.TestCase):
         for key in ("javbus_host", "proxy", "rename_folder", "overwrite", "refresh_emby", "emby_library"):
             self.assertNotIn(key, defaults)
         self.assertIs(plugin.parse_rss, sys.modules["app.plugins.anime115.anime_dmhy"].parse_rss)
+
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status_code = status
+
+    def json(self):
+        return self._payload
+
+
+class _ScriptedHttp:
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.calls = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        cid = str((kwargs.get("params") or {}).get("cid") or "")
+        for key, rows in self.pages:
+            if key == cid:
+                return _Resp({"state": True, "data": rows})
+        return _Resp({"state": True, "data": []})
+
+
+class _FakeClient:
+    def __init__(self):
+        self.added = {}
+
+    def clouddownload_task_add_url(self, payload):
+        self.added = payload
+        return {"state": True, "code": 0, "data": {"wp_path_id": payload["wp_path_id"]}}
+
+    def clouddownload_task_list(self, _payload):
+        return {"tasks": [{"info_hash": "ab" * 20, "status": 2}]}
+
+
+class _FakePan:
+    def __init__(self):
+        self.moved = []
+        self.deleted = []
+        self.client = _FakeClient()
+
+    def ensure_dir(self, path):
+        if path.endswith("Season 01"):
+            return "21"
+        if path.endswith("empty"):
+            return "31"
+        return "11"
+
+    def dir_id(self, path):
+        if path.endswith("empty"):
+            return "31"
+        if path.rstrip("/").endswith("动漫"):
+            return "11"
+        return "10"
+
+    def list_children(self, directory_id):
+        if directory_id == "11":
+            return [{"fid": "81", "fc": "1", "fn": "E01.mkv", "fs": 900 * 1024 * 1024, "pid": "11"}]
+        return []
+
+    def rename(self, _file_id, _new_name):
+        return None
+
+    def move(self, file_id, directory_id):
+        self.moved.append((file_id, directory_id))
+
+    def delete(self, file_id, parent_id):
+        self.deleted.append((file_id, parent_id))
+
+    def add_magnet(self, magnet, directory_id):
+        return self.client.clouddownload_task_add_url({"url": magnet, "wp_path_id": directory_id})
+
+    def list_tasks(self, _page):
+        return {"data": {"tasks": self.client.clouddownload_task_list({})["tasks"]}}
 
 
 class _Fake:

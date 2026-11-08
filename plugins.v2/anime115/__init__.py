@@ -13,6 +13,7 @@ from app.log import logger
 from app.plugins import _PluginBase
 
 from .anime_config import PLAY_BASE, offline_directory, usable_cookie
+from .anime_pan import CookieSession
 from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
 from .anime_flatten import Node
 from .anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize
@@ -20,7 +21,8 @@ from .anime_names import Show, norm, parse_watchlist
 from .anime_tmdb import live_bounds, shanghai_today
 
 _FORM_NOTE = (
-    "先保持「只预览」。115 Cookie 留空时使用存储 ID 对应的已登录 115，默认 u115。"
+    "先保持「只预览」。115 Cookie 含 UID= 时，本轮离线、整理和摊平都走这条 Cookie。"
+    "留空或没有 UID= 时使用存储 ID 对应的已登录 115，默认 u115。"
     "strm 目录填这台 Emby 媒体库正在扫描的路径。"
     "播放地址走 MoviePilot 上已启用的 115网盘STRM助手跳转，填外网域名，不能写 127.0.0.1。"
     "摊平即使关了预览，也要另开「摊平允许落盘」才会移动。"
@@ -33,7 +35,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -395,11 +397,12 @@ class Anime115(_PluginBase):
         return usable_cookie(getattr(self, "_cookie", ""))
 
     def _session(self):
-        """Cookie 留空时用存储 ID。填了也不改走开放平台，避免和 u115 不是同一个账号。"""
-        if self._cookie_value():
-            logger.info(f"动漫 115 已填写 115 Cookie。离线、整理和摊平仍使用已登录存储 {self._storage}")
-        else:
-            logger.info(f"动漫 115 未填 115 Cookie，使用已登录存储 {self._storage}")
+        """一轮只用一种 115 凭据。有 UID= 走 Cookie，否则走已登录存储。"""
+        cookie = self._cookie_value()
+        if cookie:
+            logger.info("动漫 115 本轮使用 115 Cookie")
+            return CookieSession(cookie, self._cancel)
+        logger.info(f"动漫 115 本轮使用已登录存储 {self._storage}")
         return _Mp115(self._storage, self._cancel)
 
     def _stopped(self) -> bool:
@@ -460,11 +463,7 @@ class Anime115(_PluginBase):
             lines.append(f"目录：{data['inbox']}")
         if getattr(self, "_strm_root", ""):
             lines.append(f"strm：{self._strm_root}")
-        lines.append(
-            "115：已填 Cookie，调用用存储 " + self._storage
-            if self._cookie_value()
-            else "115：存储 " + self._storage
-        )
+        lines.append("115：Cookie" if self._cookie_value() else "115：存储 " + self._storage)
         counts = data.get("counts") or {}
         if counts:
             lines.append(
