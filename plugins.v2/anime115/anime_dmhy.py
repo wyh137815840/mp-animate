@@ -17,7 +17,15 @@ from .anime_names import Show, parse_episode, title_matches
 
 _BATCH = re.compile(r"合集|全集|整季|batch|\bFin\b|BDrip|BDRip", re.IGNORECASE)
 _RAW = re.compile(r"生肉|\bRAW\b", re.IGNORECASE)
-_UHD = re.compile(r"2160|4K", re.IGNORECASE)
+_RES_MARKS = (
+    (2160, re.compile(r"(?<!\d)2160(?!\d)|(?<![a-z0-9])4k(?![a-z0-9])|\bUHD\b", re.IGNORECASE)),
+    (1440, re.compile(r"(?<!\d)1440(?!\d)", re.IGNORECASE)),
+    (1080, re.compile(r"(?<!\d)1080(?!\d)", re.IGNORECASE)),
+    (720, re.compile(r"(?<!\d)720(?!\d)", re.IGNORECASE)),
+    (480, re.compile(r"(?<!\d)480(?!\d)", re.IGNORECASE)),
+    (360, re.compile(r"(?<!\d)360(?!\d)", re.IGNORECASE)),
+    (240, re.compile(r"(?<!\d)240(?!\d)", re.IGNORECASE)),
+)
 _BTIH = re.compile(r"btih:([0-9a-fA-F]{40}|[A-Za-z2-7]{32})", re.IGNORECASE)
 _ROW = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
 _UNIT_NAME = r"KiB|MiB|GiB|KB|MB|GB"
@@ -238,8 +246,12 @@ def score_torrent(
         return None, "标题对不上"
     if options.require_sub and _RAW.search(title):
         return None, "生肉"
-    if options.resolution.lower() != "4k" and _UHD.search(title):
+    floor = _floor_height(options.resolution)
+    height = _title_height(title)
+    if floor >= 2160 and (height is None or height < floor):
         return None, "4K"
+    if height is not None and height < floor:
+        return None, "分辨率不足"
     if not options.allow_batch and _BATCH.search(title):
         return None, "合集"
     if torrent.published is not None and _too_old(torrent.published, now, options.lookback_hours):
@@ -253,8 +265,7 @@ def score_torrent(
     groups = [*show.groups, *options.fansub_prefer]
     if any(group and group.casefold() in title.casefold() for group in groups):
         score += 100
-    wanted = options.resolution
-    if wanted and wanted.casefold() in title.casefold():
+    if height is not None and height == floor:
         score += 40
     if re.search(r"简体|简中|CHS|\bGB\b", title, re.IGNORECASE):
         score += 30
@@ -263,6 +274,25 @@ def score_torrent(
     elif re.search(r"繁体|CHT|BIG5", title, re.IGNORECASE):
         score += 5
     return score, ""
+
+
+def _floor_height(resolution: str) -> int:
+    """配置写的是下限。1080 收 1080 和 4K。写成 4k 时只收 4K。"""
+    text = (resolution or "1080").strip().lower().replace(" ", "")
+    if text in {"4k", "2160", "2160p", "uhd"}:
+        return 2160
+    matched = re.search(r"(\d{3,4})", text)
+    if matched:
+        return int(matched.group(1))
+    return 1080
+
+
+def _title_height(title: str) -> int | None:
+    """标题里最高的分辨率。没写分辨率时返回空，1080 下限不因此丢掉。"""
+    found = [height for height, pattern in _RES_MARKS if pattern.search(title or "")]
+    if not found:
+        return None
+    return max(found)
 
 
 def _better(candidate: Pick, current: Pick) -> bool:

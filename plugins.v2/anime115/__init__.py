@@ -38,7 +38,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.16"
+    plugin_version = "1.0.17"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -217,7 +217,7 @@ class Anime115(_PluginBase):
                             _field(12, "offline_dir", "离线下载目录", "默认 /离线下载/动漫，日期子目录自动加"),
                             _field(6, "strm_root", "strm 目录", "/media/动漫，这台 Emby 媒体库正在扫描的路径"),
                             _field(12, "play_base", "播放地址模板", PLAY_BASE),
-                            _field(4, "resolution", "分辨率", "1080"),
+                            _field(4, "resolution", "分辨率", "最低 1080，4K 也收；写成 4k 则只要 4K"),
                             _field(4, "lookback_hours", "回溯小时", "36"),
                             _field(6, "mount_prefix", "挂载前缀", "/115open，只用来剥路径"),
                             _field(6, "library_root", "库根", "/动漫"),

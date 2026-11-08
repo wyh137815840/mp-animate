@@ -26,6 +26,7 @@ from anime115.anime_dmhy import (  # noqa: E402
     parse_list_sizes,
     parse_rss,
     rss_opener,
+    score_torrent,
     select_one,
 )
 from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
@@ -93,6 +94,44 @@ class ScoreTest(unittest.TestCase):
         self.assertEqual(len(picks), 1)
         self.assertEqual(picks[0].score, 170)
         self.assertEqual({item["reason"] for item in notes}, {"生肉", "合集"})
+
+    def test_1080_floor_keeps_4k_and_drops_720(self):
+        show = parse_watchlist("佐藤同学")[0]
+        options = SearchOptions(resolution="1080")
+        uhd = Torrent(
+            "[Shiniori-Raws] 佐藤同学 - 03 [4K 2160p][简体]",
+            HASH,
+            f"magnet:?xt=urn:btih:{HASH}",
+            2 * 1024 ** 3,
+            NOW,
+        )
+        hd = Torrent("佐藤同学 - 03 [1080p][简体]", "b" * 40, "magnet:?xt=urn:btih:" + "b" * 40, 900 * 1024 * 1024, NOW)
+        low = Torrent("佐藤同学 - 03 [720p][简体]", "c" * 40, "magnet:?xt=urn:btih:" + "c" * 40, 400 * 1024 * 1024, NOW)
+        plain = Torrent("佐藤同学 - 04 [简体]", "d" * 40, "magnet:?xt=urn:btih:" + "d" * 40, 900 * 1024 * 1024, NOW)
+        other = Torrent("[Shiniori-Raws] 别的节目 - 03 [4k 2160p]", "e" * 40, "magnet:?xt=urn:btih:" + "e" * 40, 2 * 1024 ** 3, NOW)
+        batch = Torrent("佐藤同学 BDRip 全集 [2160p]", "f" * 40, "magnet:?xt=urn:btih:" + "f" * 40, 2 * 1024 ** 3, NOW)
+        kept, why = score_torrent(show, uhd, options, NOW)
+        self.assertIsNotNone(kept)
+        self.assertEqual(why, "")
+        picks, notes = select_one(show, [uhd, hd, low, plain, other, batch], options, NOW)
+        by_episode = {item.episode: item.torrent.title for item in picks}
+        self.assertEqual(by_episode[3], hd.title)
+        self.assertEqual(by_episode[4], plain.title)
+        reasons = {item["title"]: item["reason"] for item in notes}
+        self.assertEqual(reasons[low.title], "分辨率不足")
+        self.assertEqual(reasons[other.title], "标题对不上")
+        self.assertEqual(reasons[batch.title], "合集")
+        self.assertNotIn(uhd.title, reasons)
+        self.assertNotIn("4K", reasons.values())
+        hd_score, _ = score_torrent(show, hd, options, NOW)
+        uhd_score, _ = score_torrent(show, uhd, options, NOW)
+        self.assertGreater(hd_score, uhd_score)
+        only_4k = SearchOptions(resolution="4k")
+        kept, _ = score_torrent(show, uhd, only_4k, NOW)
+        rejected, why = score_torrent(show, hd, only_4k, NOW)
+        self.assertIsNotNone(kept)
+        self.assertIsNone(rejected)
+        self.assertEqual(why, "4K")
 
     def test_rss_item(self):
         xml = """<?xml version="1.0"?>
@@ -965,7 +1004,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.16")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.17")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe"):
