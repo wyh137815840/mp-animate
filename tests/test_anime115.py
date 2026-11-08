@@ -11,7 +11,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins.v2" / "ani
 
 from urllib.request import ProxyHandler
 
-from anime_dmhy import SearchOptions, Torrent, moviepilot_proxy, normalize_proxy, parse_rss, rss_opener, select_one
+from anime_dmhy import (
+    SearchOptions,
+    Torrent,
+    merge_sizes,
+    moviepilot_proxy,
+    normalize_proxy,
+    parse_list_sizes,
+    parse_rss,
+    rss_opener,
+    select_one,
+)
 from anime_flatten import Node, apply_proposals, propose
 from anime_jobs import JobConfig, run_daily, run_flatten, run_organize
 from anime_names import parse_episode, parse_watchlist, strip_mount_prefix
@@ -87,6 +97,80 @@ class ScoreTest(unittest.TestCase):
         self.assertTrue(all(not item.proxies for item in direct_handlers))
         self.assertEqual(normalize_proxy("proxy.example:7900"), "http://proxy.example:7900")
         self.assertEqual(moviepilot_proxy(), "")
+
+    def test_rss_placeholder_length_uses_labeled_size(self):
+        xml = """<?xml version="1.0"?>
+        <rss><channel>
+          <item>
+            <title>[ANi] 魔法★探险家 - 07 [1080P]</title>
+            <description>Overall bit rate : 2 561 kb/s
+File size : 435 MiB</description>
+            <enclosure url="magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" length="1"/>
+          </item>
+          <item>
+            <title>佐藤同学 - 04</title>
+            <description>檔案大小：1.2GB</description>
+            <enclosure url="magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" length="1"/>
+          </item>
+          <item>
+            <title>佐藤同学 - 03</title>
+            <description>Overall bit rate : 2 561 kb/s</description>
+            <enclosure url="magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc" length="1"/>
+          </item>
+        </channel></rss>"""
+        torrents = parse_rss(xml)
+        self.assertEqual(
+            [item.size for item in torrents],
+            [435 * 1024 ** 2, int(round(1.2 * 1024 ** 3)), 0],
+        )
+
+    def test_list_page_fills_missing_size(self):
+        html = """
+        <table>
+          <tr class="">
+            <td class="title"><a href="/topics/view/1.html">【今晚月色真美】女友的朋友 [05] 8Gb</a></td>
+            <td nowrap="nowrap" align="center">
+              <a href="magnet:?xt=urn:btih:J4Q3TVSKPLVJYLI3NP5EUNXWP736FSBF&amp;dn=">&nbsp;</a>
+            </td>
+            <td nowrap="nowrap" align="center">121.5MB</td>
+            <td nowrap="nowrap" align="center"><span class="btl_1">20</span></td>
+            <td nowrap="nowrap" align="center">1919</td>
+          </tr>
+          <tr>
+            <td nowrap="nowrap" align="center">
+              <a href="magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"></a>
+            </td>
+            <td nowrap="nowrap" align="center">9.5GB</td>
+          </tr>
+        </table>
+        """
+        infohash = "4f21b9d64a7aea9c2d1b6bfa4a36f67ff7e2c825"
+        sizes = parse_list_sizes(html)
+        self.assertEqual(sizes[infohash], int(round(121.5 * 1024 ** 2)))
+        self.assertEqual(sizes["b" * 40], int(round(9.5 * 1024 ** 3)))
+        missing = Torrent("女友的朋友 - 05", infohash, "magnet:?xt=urn:btih:" + infohash, 0, NOW)
+        kept = Torrent("佐藤同学 - 03", HASH, "magnet:?xt=urn:btih:" + HASH, 900 * 1024 * 1024, NOW)
+        merge_sizes([missing, kept], sizes)
+        self.assertEqual(missing.size, sizes[infohash])
+        self.assertEqual(kept.size, 900 * 1024 * 1024)
+
+    def test_size_floor_and_cap(self):
+        show = parse_watchlist("魔法★探险家")[0]
+        options = SearchOptions(min_episode_mb=20, max_episode_gb=8, require_sub=False)
+
+        def item(title, size, digest):
+            return Torrent(title, digest, "magnet:?xt=urn:btih:" + digest, size, NOW)
+
+        real = item("魔法★探险家 - 07 [1080p]", 435 * 1024 ** 2, "d" * 40)
+        webrip = item("魔法★探险家 - 06 [1080p]", int(round(121.5 * 1024 ** 2)), "e" * 40)
+        tiny = item("魔法★探险家 - 05 [1080p]", 15 * 1024 ** 2, "f" * 40)
+        huge = item("魔法★探险家 - 04 [1080p]", int(round(9.5 * 1024 ** 3)), "1" * 40)
+        unknown = item("魔法★探险家 - 03 [1080p]", 0, "2" * 40)
+        picks, notes = select_one(show, [real, webrip, tiny, huge, unknown], options, NOW)
+        self.assertEqual({pick.episode for pick in picks}, {7, 6, 3})
+        reasons = {note["title"]: note["reason"] for note in notes}
+        self.assertEqual(reasons[tiny.title], "体积过小")
+        self.assertEqual(reasons[huge.title], "体积过大")
 
 
 class FlattenTest(unittest.TestCase):

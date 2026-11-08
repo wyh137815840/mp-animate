@@ -17,7 +17,7 @@ from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
-from anime_dmhy import SearchOptions, fetch_rss, parse_rss
+from anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
 from anime_flatten import Node
 from anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize
 from anime_names import Show, norm, parse_watchlist
@@ -29,7 +29,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -520,14 +520,24 @@ class _Mp115:
 
 
 def _entries_for(show: Show, stopped, gap: dict) -> list:
-    """每部剧查一次 RSS，两次查询至少隔 2 秒。"""
+    """每部剧查一次 RSS。体积还没有时再查列表页。相邻请求至少隔 2 秒。"""
     if stopped():
         return []
     if gap.get("done"):
         time.sleep(2)
     gap["done"] = True
-    payload = fetch_rss(show.keyword)
-    return parse_rss(payload)
+    torrents = parse_rss(fetch_rss(show.keyword))
+    if stopped() or all(item.size for item in torrents):
+        return torrents
+    time.sleep(2)
+    if stopped():
+        return torrents
+    try:
+        sizes = parse_list_sizes(fetch_list(show.keyword))
+    except Exception as exc:
+        logger.info(f"动漫花园列表页体积没补上: {exc}")
+        return torrents
+    return merge_sizes(torrents, sizes)
 
 
 def _switch(cols: int, model: str, label: str) -> dict:

@@ -19,7 +19,18 @@ _BATCH = re.compile(r"合集|全集|整季|batch|\bFin\b|BDrip|BDRip", re.IGNORE
 _RAW = re.compile(r"生肉|\bRAW\b", re.IGNORECASE)
 _UHD = re.compile(r"2160|4K", re.IGNORECASE)
 _BTIH = re.compile(r"btih:([0-9a-fA-F]{40}|[A-Za-z2-7]{32})", re.IGNORECASE)
-_SIZE = re.compile(r"([\d.]+)\s*(GB|MB|KB|GiB|MiB)", re.IGNORECASE)
+_ROW = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+_UNIT_NAME = r"KiB|MiB|GiB|KB|MB|GB"
+# 单位后面不能再跟字母或斜杠，避免把 2561 kb/s 当成体积。
+_SIZE = re.compile(rf"(\d+(?:\.\d+)?)\s*({_UNIT_NAME})(?![A-Za-z/])", re.IGNORECASE)
+_LABELED_SIZE = re.compile(
+    rf"(?:File\s*size|文件大小|档案大小|檔案大小)\s*[:：]\s*(\d+(?:\.\d+)?)\s*({_UNIT_NAME})\b",
+    re.IGNORECASE,
+)
+_SIZE_CELL = re.compile(
+    rf"<td\b[^>]*>\s*(\d+(?:\.\d+)?)\s*({_UNIT_NAME})\s*</td>",
+    re.IGNORECASE,
+)
 _UNIT = {"KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3, "KIB": 1024, "MIB": 1024 ** 2, "GIB": 1024 ** 3}
 
 
@@ -60,10 +71,25 @@ class Pick:
 
 def fetch_rss(keyword: str, timeout: int = 20) -> bytes:
     """拉取动漫花园动画分类的 RSS。已配置系统代理时走代理，否则直连。"""
-    proxy = moviepilot_proxy()
     url = "https://share.dmhy.org/topics/rss/sort_id/2/rss.xml?keyword=" + quote(keyword or "")
+    return _fetch(url, timeout, "动漫花园 RSS")
+
+
+def fetch_list(keyword: str, timeout: int = 20) -> bytes:
+    """拉取动漫花园动画分类的列表页。RSS 没有体积时从这里补。"""
+    url = (
+        "https://share.dmhy.org/topics/list?keyword="
+        + quote(keyword or "")
+        + "&sort_id=2&order=date-desc"
+    )
+    return _fetch(url, timeout, "动漫花园列表页")
+
+
+def _fetch(url: str, timeout: int, label: str) -> bytes:
+    """已配置系统代理时走代理，否则直连。"""
+    proxy = moviepilot_proxy()
     request = Request(url, headers={"User-Agent": "MoviePilot-Anime115"})
-    _log("动漫花园 RSS 经系统代理拉取" if proxy else "动漫花园 RSS 直连拉取")
+    _log(f"{label} 经系统代理拉取" if proxy else f"{label} 直连拉取")
     with rss_opener(proxy).open(request, timeout=timeout) as response:
         if getattr(response, "status", 200) != 200:
             raise RuntimeError(f"动漫花园返回 {response.status}")
@@ -117,23 +143,24 @@ def parse_rss(payload: bytes | str) -> list[Torrent]:
     found = []
     for item in root.iter("item"):
         title = _text(item, "title")
+        description = _text(item, "description")
         magnet = ""
         size = 0
         enclosure = item.find("enclosure")
         if enclosure is not None:
             magnet = enclosure.attrib.get("url") or ""
-            size = _int(enclosure.attrib.get("length"))
+            # 花园每条都写 length="1"，那不是资源字节数。
+            length = _int(enclosure.attrib.get("length"))
+            if length > 1:
+                size = length
         if not magnet:
-            description = _text(item, "description")
             matched = _BTIH.search(description)
             magnet = f"magnet:?xt=urn:btih:{matched.group(1)}" if matched else ""
-            if not size:
-                size = _size_in_text(description)
         infohash = _infohash(magnet)
         if not infohash:
             continue
         if not size:
-            size = _size_in_text(_text(item, "description"))
+            size = _size_in_text(description)
         found.append(Torrent(
             title=title,
             infohash=infohash,
@@ -267,13 +294,45 @@ def _published(value: str) -> datetime | None:
         return None
 
 
+def parse_list_sizes(payload: bytes | str) -> dict[str, int]:
+    """从列表页表格读出体积。键是 40 位 infohash，值是字节。"""
+    if isinstance(payload, bytes):
+        text = payload.decode("utf-8", "replace")
+    else:
+        text = payload or ""
+    found: dict[str, int] = {}
+    for row in _ROW.findall(text):
+        infohash = _infohash(row)
+        cell = _SIZE_CELL.search(row)
+        if not infohash or cell is None:
+            continue
+        found[infohash] = _to_bytes(cell.group(1), cell.group(2))
+    return found
+
+
+def merge_sizes(torrents: list[Torrent], sizes: dict[str, int]) -> list[Torrent]:
+    """只补还没有体积的条目。"""
+    for torrent in torrents:
+        if not torrent.size:
+            torrent.size = int(sizes.get(torrent.infohash) or 0)
+    return torrents
+
+
 def _size_in_text(value: str) -> int:
-    matched = _SIZE.search(value or "")
-    if not matched:
-        return 0
-    number = float(matched.group(1))
-    unit = _UNIT[matched.group(2).upper()]
-    return int(number * unit)
+    """优先认 File size / 文件大小。否则取正文里最大的一个体积，忽略码率。"""
+    text = value or ""
+    labeled = _LABELED_SIZE.search(text)
+    if labeled:
+        return _to_bytes(labeled.group(1), labeled.group(2))
+    best = 0
+    for matched in _SIZE.finditer(text):
+        best = max(best, _to_bytes(matched.group(1), matched.group(2)))
+    return best
+
+
+def _to_bytes(number: str, unit: str) -> int:
+    scale = _UNIT[unit.upper()]
+    return int(round(float(number) * scale))
 
 
 def _text(item: ET.Element, tag: str) -> str:
