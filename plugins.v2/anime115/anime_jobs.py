@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from .anime_dmhy import Pick, SearchOptions, select_shows
 from .anime_flatten import Node, apply_proposals, propose
-from .anime_names import Show, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
+from .anime_names import Show, _fold_name, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
 
 
 SUB_EXTS = {".ass", ".srt", ".ssa", ".sup", ".sub", ".idx", ".vtt"}
@@ -122,14 +122,15 @@ def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
         return {"ok": False, "error": "没有填写库根", "moves": [], "dry_run": config.dry_run}
     if not session.check_login():
         return {"ok": False, "error": "115 未登录", "moves": [], "dry_run": config.dry_run}
-    done = _finished_hashes(session)
+    done = _finished_tasks(session)
     work = []
     for task in tasks:
         if task.get("status") == "moved":
             continue
-        if task.get("infohash") not in done and not config.dry_run:
+        infohash = str(task.get("infohash") or "").lower()
+        if infohash not in done and not config.dry_run:
             continue
-        if config.dry_run and task.get("infohash") not in done:
+        if config.dry_run and infohash not in done:
             continue
         work.append(task)
     moves = []
@@ -137,7 +138,8 @@ def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
     _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=0, total=len(work), organized=0, skipped=0, failed=0, current="", result="")
     for index, task in enumerate(work, start=1):
         try:
-            _organize_one(task, session, library, config, moves)
+            offline = done.get(str(task.get("infohash") or "").lower()) or {}
+            _organize_one(task, session, library, config, moves, offline)
         except Exception:
             moves.append({"action": "leave", "reason": "整理失败", "task": task.get("infohash"), "nodes": []})
             _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=index, total=len(work), current=task.get("title") or task.get("show") or "", result="整理失败", organized=organized, skipped=skipped, failed=failed + 1)
@@ -168,10 +170,13 @@ def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
     return {"ok": True, "dry_run": config.dry_run, "moves": [_public_move(item) for item in moves]}
 
 
-def _organize_one(task, session, library, config, moves) -> None:
-    folder = task.get("folder") or ""
-    files = _flatten_list(session, folder, depth=3)
+def _organize_one(task, session, library, config, moves, offline=None) -> None:
+    files, pack, why = _scope_to_pack(session, task, offline or {})
+    if why:
+        moves.append({"action": "leave", "reason": why, "task": task.get("infohash"), "nodes": [], "pack": pack})
+        return
     decision = _decide_move(task, files, library)
+    decision["pack"] = pack
     moves.append(decision)
     if decision["action"] == "move":
         show_folder, why = _show_folder(session, library, task.get("show") or "")
@@ -395,7 +400,12 @@ def _landed_in_cloud_download(payload) -> bool:
 
 
 def _finished_hashes(session) -> set[str]:
-    found = set()
+    return set(_finished_tasks(session))
+
+
+def _finished_tasks(session) -> dict[str, dict]:
+    """已完成的离线任务，按 infohash 记下名字和 file_id，用来认自己的那一包。"""
+    found = {}
     for page in range(1, 6):
         payload = session.list_offline(page)
         tasks = _task_rows(payload)
@@ -404,7 +414,7 @@ def _finished_hashes(session) -> set[str]:
         for task in tasks:
             infohash = str(task.get("info_hash") or task.get("infohash") or "").lower()
             if infohash and _task_finished(task):
-                found.add(infohash)
+                found[infohash] = task
         if len(tasks) < 20:
             break
     return found
@@ -473,47 +483,207 @@ def _episode_of_name(name: str) -> tuple[int, int] | None:
     return parse_episode(text)
 
 
-def _pack_id(path: str, inbox: str) -> str:
-    """收件箱直接下的那一层就是一包。散落的文件算收件箱自己。"""
-    inbox = norm(inbox)
-    parent = parent_path(norm(path))
-    if parent == inbox or norm(path) == inbox:
-        return inbox
-    current = parent
-    while parent_path(current) != inbox and current not in ("", "/"):
-        current = parent_path(current)
-    return current
+def _scope_to_pack(session, task: dict, offline: dict) -> tuple[list[Node], str, str]:
+    """只看这一条磁力自己的目录，不扫同一天里的其它包。"""
+    inbox = norm(task.get("folder") or "")
+    if not inbox:
+        return [], "", "没有离线目录"
+    wanted = _wanted_names(task, offline)
+    file_id = _offline_file_id(offline)
+    children = list(session.list_dir(inbox) or [])
+    if _folder_is_pack(inbox, wanted):
+        return _flatten_list(session, inbox, depth=3), inbox, ""
+    chosen, why = _choose_child(children, wanted, file_id)
+    if why:
+        return [], "", why
+    if chosen is None and file_id:
+        chosen, why = _choose_by_nested_id(session, children, file_id)
+    if why:
+        return [], "", why
+    if chosen is not None:
+        if chosen.is_dir:
+            return _flatten_list(session, chosen.path, depth=3), chosen.path, ""
+        return _file_and_sidecars(children, chosen), chosen.path, ""
+    dirs = [item for item in children if item.is_dir]
+    if not dirs:
+        videos = _real_videos(children)
+        if len(videos) > 1 and wanted:
+            matched = _match_one(videos, wanted)
+            if len(matched) == 1:
+                return _file_and_sidecars(children, matched[0]), matched[0].path, ""
+        return _flatten_list(session, inbox, depth=3), inbox, ""
+    label = wanted[0] if wanted else (task.get("show") or task.get("infohash") or "")
+    listed = "、".join(item.name for item in dirs[:8])
+    return [], "", f"找不到这一包：{label}；现有 {listed}"
+
+
+def _wanted_names(task: dict, offline: dict) -> list[str]:
+    found = []
+    for key in ("name", "file_name", "n", "fn"):
+        value = str((offline or {}).get(key) or "").strip()
+        if value and value not in found:
+            found.append(value)
+    title = str(task.get("title") or "").strip()
+    if title and title not in found:
+        found.append(title)
+    show = str(task.get("show") or "").strip()
+    if show and show not in found:
+        found.append(show)
+    return found
+
+
+def _offline_file_id(offline: dict) -> str:
+    for key in ("file_id", "fid", "fileid"):
+        value = str((offline or {}).get(key) or "").strip()
+        if value and value != "0":
+            return value
+    return ""
+
+
+def _node_file_id(node: Node) -> str:
+    raw = node.raw
+    if isinstance(raw, dict):
+        return str(raw.get("fid") or raw.get("file_id") or raw.get("cid") or "").strip()
+    return str(getattr(raw, "fileid", "") or getattr(raw, "id", "") or "").strip()
+
+
+def _leaf_key(name: str) -> str:
+    text = (name or "").strip()
+    if _suffix(text) in VIDEO_EXTS or _suffix(text) in SUB_EXTS:
+        text = text.rsplit(".", 1)[0]
+    return _fold_name(text)
+
+
+def _name_hit(child: str, wanted: str, mode: str) -> bool:
+    left = _leaf_key(child)
+    right = _leaf_key(wanted)
+    if not left or not right:
+        return False
+    if left == right:
+        return mode == "exact"
+    if mode == "exact":
+        return False
+    short, long = (left, right) if len(left) <= len(right) else (right, left)
+    return len(short) >= 6 and short in long
+
+
+def _folder_is_pack(inbox: str, wanted: list[str]) -> bool:
+    """记下的路径本身就是这一包时才整目录扫描。日期目录对不上磁力名。"""
+    leaf = name_of(inbox)
+    if not leaf:
+        return False
+    return any(_name_hit(leaf, item, "exact") for item in wanted)
+
+
+def _unique_paths(nodes: list[Node]) -> list[Node]:
+    found = []
+    seen = set()
+    for item in nodes:
+        if item.path in seen:
+            continue
+        seen.add(item.path)
+        found.append(item)
+    return found
+
+
+def _prefer_dir(nodes: list[Node]) -> list[Node]:
+    dirs = [item for item in nodes if item.is_dir]
+    return _unique_paths(dirs or nodes)
+
+
+def _match_one(nodes: list[Node], wanted: list[str]) -> list[Node]:
+    """按离线任务名、再按提交标题，各自单独对。对上一个就用它。"""
+    for name in wanted:
+        for mode in ("exact", "partial"):
+            hits = _unique_paths(item for item in nodes if _name_hit(item.name, name, mode))
+            if len(hits) == 1:
+                return hits
+    return []
+
+
+def _choose_child(children: list[Node], wanted: list[str], file_id: str) -> tuple[Node | None, str]:
+    if file_id:
+        hits = [item for item in children if _node_file_id(item) == file_id]
+        picked = _prefer_dir(hits)
+        if len(picked) == 1:
+            return picked[0], ""
+        if len(picked) > 1:
+            return None, _dir_reason(picked)
+    ambiguous: list[Node] = []
+    for name in wanted:
+        exact = _prefer_dir([item for item in children if _name_hit(item.name, name, "exact")])
+        if len(exact) == 1:
+            return exact[0], ""
+        if len(exact) > 1:
+            ambiguous = exact
+            continue
+        partial = _prefer_dir([item for item in children if _name_hit(item.name, name, "partial")])
+        if len(partial) == 1:
+            return partial[0], ""
+        if len(partial) > 1:
+            ambiguous = partial
+    if ambiguous:
+        return None, _dir_reason(ambiguous)
+    return None, ""
+
+
+def _choose_by_nested_id(session, children: list[Node], file_id: str) -> tuple[Node | None, str]:
+    """file_id 有时是外壳里面的正片，而不是外壳自己。"""
+    owners = []
+    for directory in children:
+        if not directory.is_dir:
+            continue
+        nested = session.list_dir(directory.path) or []
+        if any(_node_file_id(item) == file_id for item in nested):
+            owners.append(directory)
+    if len(owners) == 1:
+        return owners[0], ""
+    if len(owners) > 1:
+        return None, _dir_reason(owners)
+    return None, ""
+
+
+def _dir_reason(nodes: list[Node]) -> str:
+    return "不止一个目录：" + "、".join(item.name for item in nodes[:8])
+
+
+def _file_and_sidecars(children: list[Node], video: Node) -> list[Node]:
+    stem = video.name.rsplit(".", 1)[0] if "." in video.name else video.name
+    home = parent_path(video.path)
+    kept = []
+    for item in children:
+        if item.path == video.path:
+            kept.append(item)
+            continue
+        if item.is_dir or parent_path(item.path) != home:
+            continue
+        if _is_video_file(item):
+            continue
+        if _is_subtitle(item.name) or item.name.startswith(stem + ".") or item.name.startswith(stem + " "):
+            kept.append(item)
+    return kept
 
 
 def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
-    """名叫 .mkv 的外壳如果里面只有一个正片，就用那个正片。"""
-    inbox = task.get("folder") or ""
+    """这一包里只有一个正片就用它。多个正片时只留集数对得上的，不对跨包合并。"""
     videos = _real_videos(files)
-    if not videos:
-        return []
+    if len(videos) <= 1:
+        return videos
     season = int(task.get("season") or 0)
     episode = int(task.get("episode") or 0)
-    if episode <= 0:
-        return videos
-    grouped: dict[str, list[Node]] = {}
-    for item in videos:
-        grouped.setdefault(_pack_id(item.path, inbox), []).append(item)
-    candidates = []
-    for pack, group in grouped.items():
-        picked = _one_in_pack(pack, group, inbox, season, episode)
-        if picked is not None:
-            candidates.append(picked)
-    if len(candidates) == 1:
-        return candidates
-    titled = [item for item in candidates if _title_hits(item, task)]
+    if episode > 0:
+        named = [item for item in videos if _same_episode(_episode_of_name(item.name), season, episode)]
+        if len(named) == 1:
+            return named
+        titled = [item for item in named if _title_hits(item, task)]
+        if len(titled) == 1:
+            return titled
+        if named:
+            return named
+    titled = [item for item in videos if _title_hits(item, task)]
     if len(titled) == 1:
         return titled
-    if candidates:
-        return candidates
-    named = [item for item in videos if _same_episode(_episode_of_name(item.name), season, episode)]
-    if len(named) == 1:
-        return named
-    return named or videos
+    return videos
 
 
 def _real_videos(files: list[Node]) -> list[Node]:
@@ -528,21 +698,6 @@ def _real_videos(files: list[Node]) -> list[Node]:
             continue
         found.append(item)
     return found
-
-
-def _one_in_pack(pack: str, group: list[Node], inbox: str, season: int, episode: int) -> Node | None:
-    if pack == norm(inbox):
-        named = [item for item in group if _same_episode(_episode_of_name(item.name), season, episode)]
-        return named[0] if len(named) == 1 else None
-    if len(group) == 1 and (
-        _same_episode(_episode_of_name(name_of(pack)), season, episode)
-        or _same_episode(_episode_of_name(group[0].name), season, episode)
-    ):
-        return group[0]
-    named = [item for item in group if _same_episode(_episode_of_name(item.name), season, episode)]
-    if len(named) == 1:
-        return named[0]
-    return None
 
 
 def _title_hits(video: Node, task: dict) -> bool:

@@ -36,7 +36,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.13"
+    plugin_version = "1.0.14"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -525,7 +525,9 @@ class Anime115(_PluginBase):
         for item in (data.get("notes") or [])[:20]:
             lines.append(f"跳过  {item.get('show')}  {item.get('reason')}  {item.get('title')}")
         for item in (data.get("moves") or [])[:20]:
-            lines.append(f"整理  {item.get('action')}  {item.get('reason')}  {item.get('dest_dir') or ''}")
+            lines.append(
+                f"整理  {item.get('action')}  {item.get('reason')}  {item.get('pack') or ''}  {item.get('dest_dir') or ''}".rstrip()
+            )
         return "\n".join(lines)
 
 

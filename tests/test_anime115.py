@@ -475,6 +475,146 @@ class JobTest(unittest.TestCase):
         self.assertEqual(result["moves"][0]["name"], video)
         self.assertNotIn("不止一个视频", result["moves"][0]["reason"])
 
+    def test_same_episode_stays_inside_its_own_pack(self):
+        day = "/离线下载/动漫/20261108"
+        sato_pack = day + "/[LoliHouse] Shiotaiou no Sato-san - 05 [WebRip].mkv"
+        magic_pack = day + "/[LoliHouse] Magical Explorer - 05 [WebRip].mkv"
+        sato_video = "Shiotaiou no Sato-san ga Ore ni dake Amaesasete Kureru - 05 [WebRip].mkv"
+        magic_video = "Magical Explorer - 05 [WebRip].mkv"
+        sato_sub = "Shiotaiou no Sato-san ga Ore ni dake Amaesasete Kureru - 05 [WebRip].chs.srt"
+        session = _Fake()
+        session.offline = [
+            {"info_hash": HASH, "status": 2, "name": "[LoliHouse] Shiotaiou no Sato-san - 05 [WebRip].mkv", "file_id": "sato-pack"},
+            {"info_hash": "b" * 40, "status": 2, "name": "[LoliHouse] Magical Explorer - 05 [WebRip].mkv", "file_id": "magic-pack"},
+        ]
+        session.dirs["/动漫"] = [
+            Node("/动漫/冷淡的佐藤同学只对我撒娇 (2026)", "冷淡的佐藤同学只对我撒娇 (2026)", True),
+            Node("/动漫/魔法★探险家 (2026)", "魔法★探险家 (2026)", True),
+        ]
+        session.dirs[day] = [
+            Node(sato_pack, "[LoliHouse] Shiotaiou no Sato-san - 05 [WebRip].mkv", True, raw={"fid": "sato-pack"}),
+            Node(magic_pack, "[LoliHouse] Magical Explorer - 05 [WebRip].mkv", True, raw={"fid": "magic-pack"}),
+        ]
+        session.dirs[sato_pack] = [
+            Node(f"{sato_pack}/{sato_video}", sato_video, False, 900 * 1024 * 1024, raw={"fid": "sato-file"}),
+            Node(f"{sato_pack}/{sato_sub}", sato_sub, False, 1000),
+        ]
+        session.dirs[magic_pack] = [
+            Node(f"{magic_pack}/{magic_video}", magic_video, False, 900 * 1024 * 1024, raw={"fid": "magic-file"}),
+        ]
+        tasks = [
+            {
+                "infohash": HASH,
+                "show": "冷淡的佐藤同学只对我撒娇",
+                "season": 1,
+                "episode": 5,
+                "title": "[LoliHouse] 冷淡的佐藤同学只对我撒娇 - 05 [WebRip]",
+                "folder": day,
+                "status": "submitted",
+            },
+            {
+                "infohash": "b" * 40,
+                "show": "魔法★探险家",
+                "season": 1,
+                "episode": 5,
+                "title": "[LoliHouse] 魔法★探险家 - 05 [WebRip]",
+                "folder": day,
+                "status": "submitted",
+            },
+        ]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertEqual(result["moves"][0]["action"], "move")
+        self.assertEqual(result["moves"][0]["name"], sato_video)
+        self.assertEqual(result["moves"][0]["pack"], sato_pack)
+        self.assertEqual(result["moves"][0]["dest_dir"], "/动漫/冷淡的佐藤同学只对我撒娇 (2026)/Season 01")
+        self.assertEqual(result["moves"][1]["action"], "move")
+        self.assertEqual(result["moves"][1]["name"], magic_video)
+        self.assertEqual(result["moves"][1]["pack"], magic_pack)
+        self.assertEqual(result["moves"][1]["dest_dir"], "/动漫/魔法★探险家 (2026)/Season 01")
+        moved_names = [item[2] for item in session.moves]
+        self.assertEqual(moved_names, [sato_video, sato_sub, magic_video])
+        self.assertNotIn("不止一个视频", result["moves"][0]["reason"])
+        self.assertNotIn("不止一个视频", result["moves"][1]["reason"])
+
+    def test_same_episode_without_pack_name_is_not_merged(self):
+        day = "/离线下载/动漫/20261108"
+        sato_pack = day + "/[LoliHouse] Shiotaiou no Sato-san - 02 [WebRip].mkv"
+        magic_pack = day + "/[LoliHouse] Magical Explorer - 02 [WebRip].mkv"
+        session = _Fake()
+        session.offline = [
+            {"info_hash": HASH, "status": 2},
+            {"info_hash": "b" * 40, "status": 2},
+        ]
+        session.dirs[day] = [
+            Node(sato_pack, "[LoliHouse] Shiotaiou no Sato-san - 02 [WebRip].mkv", True),
+            Node(magic_pack, "[LoliHouse] Magical Explorer - 02 [WebRip].mkv", True),
+        ]
+        session.dirs[sato_pack] = [
+            Node(f"{sato_pack}/Shiotaiou - 02.mkv", "Shiotaiou - 02.mkv", False, 900 * 1024 * 1024),
+        ]
+        session.dirs[magic_pack] = [
+            Node(f"{magic_pack}/Magical Explorer - 02.mkv", "Magical Explorer - 02.mkv", False, 900 * 1024 * 1024),
+        ]
+        tasks = [
+            {
+                "infohash": HASH,
+                "show": "冷淡的佐藤同学只对我撒娇",
+                "season": 1,
+                "episode": 2,
+                "title": "[LoliHouse] 冷淡的佐藤同学只对我撒娇 - 02 [WebRip]",
+                "folder": day,
+                "status": "submitted",
+            },
+            {
+                "infohash": "b" * 40,
+                "show": "魔法★探险家",
+                "season": 1,
+                "episode": 2,
+                "title": "[LoliHouse] 魔法★探险家 - 02 [WebRip]",
+                "folder": day,
+                "status": "submitted",
+            },
+        ]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertTrue(result["moves"][0]["reason"].startswith("找不到这一包"))
+        self.assertTrue(result["moves"][1]["reason"].startswith("找不到这一包"))
+        self.assertNotIn("不止一个视频", result["moves"][0]["reason"])
+        self.assertNotIn("不止一个视频", result["moves"][1]["reason"])
+        self.assertIn("Shiotaiou", result["moves"][0]["reason"])
+        self.assertIn("Magical Explorer", result["moves"][0]["reason"])
+        self.assertEqual(session.moves, [])
+
+    def test_inner_file_id_selects_that_shell(self):
+        day = "/离线下载/动漫/20261108"
+        sato_pack = day + "/[LoliHouse] Shiotaiou no Sato-san - 04 [WebRip].mkv"
+        magic_pack = day + "/[LoliHouse] Magical Explorer - 04 [WebRip].mkv"
+        video = "Shiotaiou no Sato-san - 04 [WebRip].mkv"
+        session = _Fake()
+        session.offline = [{"info_hash": HASH, "status": 2, "file_id": "sato-file"}]
+        session.dirs[day] = [
+            Node(sato_pack, "[LoliHouse] Shiotaiou no Sato-san - 04 [WebRip].mkv", True, raw={"fid": "sato-pack"}),
+            Node(magic_pack, "[LoliHouse] Magical Explorer - 04 [WebRip].mkv", True, raw={"fid": "magic-pack"}),
+        ]
+        session.dirs[sato_pack] = [
+            Node(f"{sato_pack}/{video}", video, False, 900 * 1024 * 1024, raw={"fid": "sato-file"}),
+        ]
+        session.dirs[magic_pack] = [
+            Node(f"{magic_pack}/Magical Explorer - 04.mkv", "Magical Explorer - 04.mkv", False, 900 * 1024 * 1024, raw={"fid": "magic-file"}),
+        ]
+        tasks = [{
+            "infohash": HASH,
+            "show": "冷淡的佐藤同学只对我撒娇",
+            "season": 1,
+            "episode": 4,
+            "title": "[LoliHouse] 冷淡的佐藤同学只对我撒娇 - 04 [WebRip]",
+            "folder": day,
+            "status": "submitted",
+        }]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertEqual(result["moves"][0]["action"], "move")
+        self.assertEqual(result["moves"][0]["pack"], sato_pack)
+        self.assertEqual(result["moves"][0]["name"], video)
+
     def test_flatten_does_nothing_when_all_collision(self):
         session = _Fake()
         session.dirs["/inbox"] = [Node("/inbox/show", "show", True)]
@@ -642,7 +782,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.13")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.14")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress"):
