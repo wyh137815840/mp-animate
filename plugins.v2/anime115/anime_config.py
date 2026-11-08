@@ -6,6 +6,10 @@ PLAY_BASE = (
     "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url"
     "?pickcode={pickcode}&file_name={filename}"
 )
+PLAY_BASE_LAN = (
+    "http://192.168.1.9:3000/api/v1/plugin/P115StrmHelper/redirect_url"
+    "?pickcode={pickcode}&file_name={filename}"
+)
 
 
 def usable_cookie(value: str) -> str:

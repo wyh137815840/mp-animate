@@ -8,11 +8,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from fastapi import Request
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+
 from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
-from .anime_config import PLAY_BASE, offline_directory, usable_cookie
+from .anime_config import PLAY_BASE, PLAY_BASE_LAN, offline_directory, usable_cookie
+from .anime_playurl import (
+    DEFAULT_LAN_CIDRS,
+    DEFAULT_PUBLIC_HOSTS,
+    PlayUrlError,
+    decide_location,
+    nginx_snippet,
+)
 from .anime_pan import CookieSession
 from .anime_progress import advance, format_progress, format_state
 from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
@@ -26,7 +36,8 @@ _FORM_NOTE = (
     "先保持「只预览」。115 Cookie 含 UID= 时，本轮离线、整理和摊平都走这条 Cookie。"
     "留空或没有 UID= 时使用存储 ID 对应的已登录 115，默认 u115。"
     "strm 目录填这台 Emby 媒体库正在扫描的路径。整理成功后按季目录写 strm，不写 nfo。"
-    "已经在库里的文件用 job=strm 补 strm，不移动。播放地址走 MoviePilot 上已启用的 115网盘STRM助手跳转，填外网域名，不能写 127.0.0.1。"
+    "已经在库里的文件用 job=strm 重新生成 strm，不移动。strm 默认写内网播放地址，局域网不再走外网域名。"
+    "外网播放地址留给公网 Emby 反代。两个地址都不能写 127.0.0.1。115 直链仍由 115网盘STRM助手签发。"
     "每日默认从 MoviePilot 订阅里只挑动漫去花园搜。电视剧和电影不搜。离线提交走已登录的存储，不使用 P115Client。"
     "摊平即使关了预览，也要另开「摊平允许落盘」才会移动。"
 )
@@ -38,7 +49,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.17"
+    plugin_version = "1.0.18"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -75,6 +86,10 @@ class Anime115(_PluginBase):
     _cookie = ""
     _strm_root = ""
     _play_base = PLAY_BASE
+    _play_base_lan = PLAY_BASE_LAN
+    _strm_for = "lan"
+    _lan_cidrs = DEFAULT_LAN_CIDRS
+    _public_hosts = DEFAULT_PUBLIC_HOSTS
 
     def init_plugin(self, config: dict = None):
         """读配置。勾了立即运行就跑一次每日任务。"""
@@ -98,6 +113,10 @@ class Anime115(_PluginBase):
         self._cookie = usable_cookie(str(config.get("cookie") or ""))
         self._strm_root = str(config.get("strm_root") or "").strip()
         self._play_base = str(config.get("play_base") or PLAY_BASE).strip() or PLAY_BASE
+        self._play_base_lan = str(config.get("play_base_lan") or PLAY_BASE_LAN).strip() or PLAY_BASE_LAN
+        self._strm_for = _strm_mode(config.get("strm_for"))
+        self._lan_cidrs = str(config.get("lan_cidrs") or DEFAULT_LAN_CIDRS).strip() or DEFAULT_LAN_CIDRS
+        self._public_hosts = str(config.get("public_hosts") or DEFAULT_PUBLIC_HOSTS).strip() or DEFAULT_PUBLIC_HOSTS
         self._mount_prefix = str(config.get("mount_prefix") or "/115open").strip()
         self._library_root = str(config.get("library_root") or "").strip()
         self._flatten_roots = str(config.get("flatten_roots") or "")
@@ -149,6 +168,22 @@ class Anime115(_PluginBase):
                 "auth": "apikey",
                 "summary": "最近一次结果",
                 "description": "返回最近一次任务摘要",
+            },
+            {
+                "path": "/redirect_url",
+                "endpoint": self.api_redirect,
+                "methods": ["GET", "HEAD"],
+                "summary": "按来源跳转播放地址",
+                "description": "内网请求跳到内网 MoviePilot，外网请求跳到外网域名。",
+                "allow_anonymous": True,
+            },
+            {
+                "path": "/play_url",
+                "endpoint": self.api_play_url,
+                "methods": ["GET"],
+                "summary": "查看本次会使用的播放地址",
+                "description": "返回 intranet、reason 和 url，不发起 115 请求。",
+                "allow_anonymous": True,
             },
         ]
 
@@ -216,7 +251,11 @@ class Anime115(_PluginBase):
                             ),
                             _field(12, "offline_dir", "离线下载目录", "默认 /离线下载/动漫，日期子目录自动加"),
                             _field(6, "strm_root", "strm 目录", "/media/动漫，这台 Emby 媒体库正在扫描的路径"),
-                            _field(12, "play_base", "播放地址模板", PLAY_BASE),
+                            _field(12, "play_base_lan", "内网播放地址", "http://192.168.1.9:3000 或 http://192.168.1.10:8787/redirect?pickcode={pickcode}"),
+                            _field(12, "play_base", "外网播放地址", PLAY_BASE),
+                            _field(6, "strm_for", "strm 使用的地址", "lan、public 或 redirect"),
+                            _field(6, "public_hosts", "外网域名", "mp.yuanhot.top"),
+                            _field(12, "lan_cidrs", "内网网段", "192.168.0.0/16,10.0.0.0/8"),
                             _field(4, "resolution", "分辨率", "最低 1080，4K 也收；写成 4k 则只要 4K"),
                             _field(4, "lookback_hours", "回溯小时", "36"),
                             _field(6, "mount_prefix", "挂载前缀", "/115open，只用来剥路径"),
@@ -250,6 +289,10 @@ class Anime115(_PluginBase):
             "offline_dir": "/离线下载/动漫",
             "strm_root": "",
             "play_base": PLAY_BASE,
+            "play_base_lan": PLAY_BASE_LAN,
+            "strm_for": "lan",
+            "lan_cidrs": DEFAULT_LAN_CIDRS,
+            "public_hosts": DEFAULT_PUBLIC_HOSTS,
             "resolution": "1080",
             "lookback_hours": 36,
             "mount_prefix": "/115open",
@@ -271,15 +314,27 @@ class Anime115(_PluginBase):
         detail = self._page_text()
         if detail:
             text = text + "\n" + detail
-        return [{
-            "component": "VAlert",
-            "props": {
-                "type": "info",
-                "variant": "tonal",
-                "text": text,
-                "style": "white-space: pre-line;",
+        return [
+            {
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": text,
+                    "style": "white-space: pre-line;",
+                },
             },
-        }]
+            {
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "class": "mt-3",
+                    "text": self._play_note(),
+                    "style": "white-space: pre-line;",
+                },
+            },
+        ]
 
     def stop_service(self):
         """让正在跑的循环在下一轮停下。"""
@@ -312,6 +367,64 @@ class Anime115(_PluginBase):
         if not payload:
             return {"ok": False, "error": "还没有运行记录", "state": format_state(None), "progress": format_progress(None)}
         return payload
+
+    def api_redirect(self, request: Request):
+        """Emby 打开跳转地址时，302 到这次请求对应的播放地址。"""
+        try:
+            decision = self._decision(request)
+        except PlayUrlError as exc:
+            return Response(content=str(exc), status_code=409)
+        logger.info(
+            "动漫 115 播放跳转：%s %s -> %s",
+            "内网" if decision.intranet else "外网",
+            decision.reason,
+            decision.url.split("?", 1)[0],
+        )
+        return RedirectResponse(url=decision.url, status_code=302)
+
+    def api_play_url(self, request: Request):
+        """返回本次判断，方便核对内网是否还会带上外网域名。"""
+        try:
+            decision = self._decision(request)
+        except PlayUrlError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+        return {
+            "ok": True,
+            "intranet": decision.intranet,
+            "reason": decision.reason,
+            "url": decision.url,
+        }
+
+    def _decision(self, request: Request):
+        peer = request.client.host if request.client else ""
+        return decide_location(
+            peer_ip=peer,
+            host=request.headers.get("host", ""),
+            headers=request.headers,
+            public_template=self._play_base,
+            lan_template=self._play_base_lan,
+            pickcode=request.query_params.get("pickcode") or request.query_params.get("pc") or "",
+            filename=request.query_params.get("file_name") or request.query_params.get("filename") or "",
+            lan_cidrs=self._lan_cidrs,
+            public_hosts=self._public_hosts,
+            request_path=request.url.path,
+        )
+
+    def _play_note(self) -> str:
+        """详情页上的内网播放说明和公网反代片段。"""
+        try:
+            snippet = nginx_snippet(self._play_base, self._play_base_lan)
+        except PlayUrlError as exc:
+            snippet = str(exc)
+        return (
+            f"strm 使用的地址：{self._strm_for}。默认 lan，文件里不写外网域名。\n"
+            f"内网播放地址：{self._play_base_lan}\n"
+            f"外网播放地址：{self._play_base}\n"
+            "已有动漫 strm 要重新生成：POST /api/v1/plugin/Anime115/run?job=strm\n"
+            "重载本插件即可，不必重启 MoviePilot。\n"
+            "公网 Emby 反代片段：\n"
+            f"{snippet}"
+        )
 
     def run_daily(self) -> dict:
         """搜动漫花园，预览或提交离线。"""
@@ -511,6 +624,9 @@ class Anime115(_PluginBase):
             min_episode_mb=self._min_episode_mb,
             strm_root=self._strm_root,
             play_base=self._play_base,
+            play_base_lan=self._play_base_lan,
+            strm_for=self._strm_for,
+            public_hosts=self._public_hosts,
         )
 
     def _report(self, patch: dict) -> None:
@@ -788,6 +904,14 @@ def _merge_shows(primary: list, extra: list) -> list:
         seen.add(key)
         found.append(show)
     return found
+
+
+def _strm_mode(value) -> str:
+    """旧配置没有这一项时，strm 改走内网地址。"""
+    text = str(value or "").strip().lower()
+    if text in {"lan", "public", "redirect"}:
+        return text
+    return "lan"
 
 
 def _as_int(value, default: int) -> int:

@@ -9,9 +9,9 @@ from pathlib import Path
 
 from .anime_dmhy import Pick, SearchOptions, select_shows
 from .anime_flatten import Node, apply_proposals, propose
-from .anime_config import PLAY_BASE
 from .anime_names import Show, _fold_name, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
-from .anime_strm import build_play_url, pickcode_of, strm_relative, write_strm
+from .anime_playurl import PlayUrlError, play_url_for_strm
+from .anime_strm import pickcode_of, strm_relative, write_strm
 
 
 SUB_EXTS = {".ass", ".srt", ".ssa", ".sup", ".sub", ".idx", ".vtt"}
@@ -38,6 +38,9 @@ class JobConfig:
     min_episode_mb: int = 80
     strm_root: str = ""
     play_base: str = ""
+    play_base_lan: str = ""
+    strm_for: str = ""
+    public_hosts: str = ""
 
 
 def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None) -> dict:
@@ -878,7 +881,11 @@ def _apply_strm(decision: dict, config: JobConfig, write: bool) -> None:
         decision["strm_error"] = "集数对不上"
         return
     relative = strm_relative(show, season, episode, video.name)
-    url = build_play_url(config.play_base or PLAY_BASE, code, video.name)
+    try:
+        url = _play_url(config, code, video.name)
+    except PlayUrlError as exc:
+        decision["strm_error"] = str(exc)
+        return
     if not write:
         decision["strm"] = str(Path(root) / relative)
         return
@@ -926,7 +933,10 @@ def _strm_one(row: dict, config: JobConfig) -> dict:
     if not code:
         return {"action": "skip", "reason": "缺少 pickcode", "name": video.name, "path": ""}
     relative = strm_relative(row["show"], row["season"], row["episode"], video.name)
-    url = build_play_url(config.play_base or PLAY_BASE, code, video.name)
+    try:
+        url = _play_url(config, code, video.name)
+    except PlayUrlError as exc:
+        return {"action": "skip", "reason": str(exc), "name": video.name, "path": ""}
     path = str(Path(config.strm_root) / relative)
     if config.dry_run:
         return {"action": "write", "reason": "ok", "name": video.name, "path": path}
@@ -935,6 +945,18 @@ def _strm_one(row: dict, config: JobConfig) -> dict:
     except OSError as exc:
         return {"action": "write", "reason": "strm 写入失败", "error": f"strm 写入失败：{exc}", "name": video.name, "path": path}
     return {"action": "write", "reason": "ok", "name": video.name, "path": written}
+
+
+def _play_url(config: JobConfig, pickcode: str, filename: str) -> str:
+    """按 strm 模式生成播放地址。空模式仍只用原来的播放地址模板。"""
+    return play_url_for_strm(
+        config.play_base,
+        pickcode,
+        filename,
+        play_base_lan=config.play_base_lan,
+        strm_for=config.strm_for,
+        public_hosts=config.public_hosts,
+    )
 
 
 def _season_dir_number(name: str) -> int:
