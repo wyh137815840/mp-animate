@@ -28,7 +28,7 @@ from anime115.anime_dmhy import (  # noqa: E402
     select_one,
 )
 from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
-from anime115.anime_jobs import JobConfig, run_daily, run_flatten, run_organize  # noqa: E402
+from anime115.anime_jobs import JobConfig, resolve_show_folder, run_daily, run_flatten, run_organize  # noqa: E402
 from anime115.anime_config import PLAY_BASE, offline_directory, usable_cookie  # noqa: E402
 from anime115.anime_jobs import _finished_hashes  # noqa: E402
 from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix, title_matches  # noqa: E402
@@ -364,6 +364,50 @@ class JobTest(unittest.TestCase):
         self.assertFalse(_is_directory(video))
         self.assertEqual(video["fn"], "魔法★探险家 - 06.mkv")
 
+    def test_show_folder_prefers_exact_then_unique_year(self):
+        names = ["冷淡的佐藤同学只对我撒娇 (2026)", "魔法★探险家 (2026)", "冷淡的佐藤同学只对我撒娇"]
+        self.assertEqual(resolve_show_folder(names, "冷淡的佐藤同学只对我撒娇"), ("冷淡的佐藤同学只对我撒娇", ""))
+        self.assertEqual(resolve_show_folder(["魔法★探险家 (2026)"], "魔法★探险家"), ("魔法★探险家 (2026)", ""))
+        self.assertEqual(
+            resolve_show_folder(["魔法★探险家 (2025)", "魔法★探险家 (2026)"], "魔法★探险家"),
+            ("", "剧名目录不唯一"),
+        )
+        self.assertEqual(resolve_show_folder([], "新番"), ("新番", ""))
+
+    def test_organize_reuses_year_folder_and_continues_after_create_failure(self):
+        session = _Fake()
+        session.offline = [{"info_hash": HASH, "status": 2}, {"info_hash": "b" * 40, "status": 2}]
+        session.dirs["/动漫"] = [
+            Node("/动漫/冷淡的佐藤同学只对我撒娇 (2026)", "冷淡的佐藤同学只对我撒娇 (2026)", True),
+            Node("/动漫/魔法★探险家 (2026)", "魔法★探险家 (2026)", True),
+        ]
+        session.dirs["/inbox"] = [
+            Node("/inbox/佐藤同学 - 03 [1080p].mkv", "佐藤同学 - 03 [1080p].mkv", False, 900 * 1024 * 1024),
+            Node("/inbox/魔法★探险家 - 06 [1080p].mkv", "魔法★探险家 - 06 [1080p].mkv", False, 900 * 1024 * 1024),
+        ]
+        session.fail_create = "魔法"
+
+        def ensure_dir(path):
+            session.made.append(path)
+            if session.fail_create and session.fail_create in path:
+                raise RuntimeError("无法创建 115 目录 " + path)
+            return type("Folder", (), {"fileid": "99", "path": path})()
+
+        session.ensure_dir = ensure_dir
+        session.made = []
+        tasks = [
+            {"infohash": HASH, "show": "冷淡的佐藤同学只对我撒娇", "season": 1, "episode": 3, "title": "佐藤同学 - 03", "folder": "/inbox", "status": "submitted"},
+            {"infohash": "b" * 40, "show": "魔法★探险家", "season": 1, "episode": 6, "title": "魔法★探险家 - 06", "folder": "/inbox", "status": "submitted"},
+        ]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["moves"][0]["action"], "move")
+        self.assertEqual(result["moves"][0]["dest_dir"], "/动漫/冷淡的佐藤同学只对我撒娇 (2026)/Season 01")
+        self.assertEqual(result["moves"][1]["action"], "leave")
+        self.assertEqual(result["moves"][1]["reason"], "建不了目标目录")
+        self.assertEqual(tasks[0]["status"], "moved")
+        self.assertEqual(tasks[1]["status"], "submitted")
+
     def test_flatten_does_nothing_when_all_collision(self):
         session = _Fake()
         session.dirs["/inbox"] = [Node("/inbox/show", "show", True)]
@@ -531,7 +575,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.10")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.11")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress"):

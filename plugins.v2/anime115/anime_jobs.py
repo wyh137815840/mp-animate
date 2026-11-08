@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,7 @@ from .anime_names import Show, join_path, name_of, norm, parent_path, parse_epis
 
 SUB_EXTS = {".ass", ".srt", ".ssa", ".sup"}
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".ts", ".m2ts"}
+_SHOW_YEAR = re.compile(r"^(.+?) [(（](\d{4})[)）]$")
 
 
 @dataclass
@@ -139,6 +141,14 @@ def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
         decision = _decide_move(task, files, library)
         moves.append(decision)
         title = task.get("title") or task.get("show") or ""
+        if decision["action"] == "move":
+            show_folder, why = _show_folder(session, library, task.get("show") or "")
+            if why:
+                decision["action"] = "leave"
+                decision["reason"] = why
+            else:
+                season_name = decision["dest_dir"].rsplit("/", 1)[-1]
+                decision["dest_dir"] = join_path(join_path(library, show_folder), season_name)
         if decision["action"] != "move" or config.dry_run:
             if decision["action"] == "move":
                 organized += 1
@@ -149,13 +159,20 @@ def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
             _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=index, total=len(work), current=title, result=mark, organized=organized, skipped=skipped, failed=failed)
             continue
         dest_dir = decision["dest_dir"]
-        if session.ensure_dir(dest_dir) is None:
+        try:
+            made = session.ensure_dir(dest_dir)
+        except Exception:
+            made = None
+        if made is None or not str(getattr(made, "fileid", "") or ""):
             decision["action"] = "leave"
             decision["reason"] = "建不了目标目录"
             failed += 1
             _tell(report, job="organize", phase="running", dry_run=False, index=index, total=len(work), current=title, result="失败", organized=organized, skipped=skipped, failed=failed)
             continue
-        existing = {item.name for item in session.list_dir(dest_dir)}
+        try:
+            existing = {item.name for item in session.list_dir(dest_dir)}
+        except Exception:
+            existing = set()
         if decision["name"] in existing:
             decision["action"] = "leave"
             decision["reason"] = "collision"
@@ -163,11 +180,14 @@ def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
             _tell(report, job="organize", phase="running", dry_run=False, index=index, total=len(work), current=title, result="跳过", organized=organized, skipped=skipped, failed=failed)
             continue
         ok = True
-        for item in decision["nodes"]:
-            if not session.move(item, dest_dir, item.name):
-                ok = False
-                break
-            session.sleep(config.move_gap_seconds)
+        try:
+            for item in decision["nodes"]:
+                if not session.move(item, dest_dir, item.name):
+                    ok = False
+                    break
+                session.sleep(config.move_gap_seconds)
+        except Exception:
+            ok = False
         if ok:
             task["status"] = "moved"
             organized += 1
@@ -393,6 +413,37 @@ def _task_rows(payload) -> list:
             if isinstance(data.get(key), list):
                 return data[key]
     return []
+
+
+def resolve_show_folder(names: list[str], show: str) -> tuple[str, str]:
+    """库根下优先用完全同名的剧目录。没有时，唯一的「剧名 (年份)」也可以。"""
+    wanted = safe_dir_name(show or "") or "unknown"
+    folders = [name for name in names if name]
+    if wanted in folders:
+        return wanted, ""
+    years = []
+    raw = (show or "").strip()
+    for name in folders:
+        matched = _SHOW_YEAR.match(name.strip())
+        if not matched:
+            continue
+        stem = matched.group(1).strip()
+        if safe_dir_name(stem) == wanted or stem == raw:
+            years.append(name)
+    if len(years) == 1:
+        return years[0], ""
+    if len(years) > 1:
+        return "", "剧名目录不唯一"
+    return wanted, ""
+
+
+def _show_folder(session, library: str, show: str) -> tuple[str, str]:
+    try:
+        children = session.list_dir(library) or []
+    except Exception:
+        children = []
+    names = [item.name for item in children if getattr(item, "is_dir", False)]
+    return resolve_show_folder(names, show)
 
 
 def _is_video_file(item: Node) -> bool:
