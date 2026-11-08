@@ -408,6 +408,39 @@ class JobTest(unittest.TestCase):
         self.assertEqual(tasks[0]["status"], "moved")
         self.assertEqual(tasks[1]["status"], "submitted")
 
+    def test_sidecars_are_not_extra_videos(self):
+        session = _Fake()
+        session.offline = [{"info_hash": HASH, "status": 2}, {"info_hash": "b" * 40, "status": 2}]
+        pack = "/inbox/佐藤同学 - 02.mkv"
+        other = "/inbox/佐藤同学 - 03.mkv"
+        video = "佐藤同学 - 02 [WebRip].mkv"
+        session.dirs["/inbox"] = [
+            Node(pack, "佐藤同学 - 02.mkv", True),
+            Node(other, "佐藤同学 - 03.mkv", True),
+        ]
+        session.dirs[pack] = [
+            Node(f"{pack}/{video}", video, False, 900 * 1024 * 1024),
+            Node(f"{pack}/佐藤同学 - 02 [WebRip].ass", "佐藤同学 - 02 [WebRip].ass", False, 2000),
+            Node(f"{pack}/佐藤同学 - 02 [WebRip].chs.srt", "佐藤同学 - 02 [WebRip].chs.srt", False, 2000),
+            Node(f"{pack}/NCOP.mkv", "NCOP.mkv", False, 80 * 1024 * 1024),
+        ]
+        session.dirs[other] = [
+            Node(f"{other}/佐藤同学 - 03 [WebRip].mkv", "佐藤同学 - 03 [WebRip].mkv", False, 900 * 1024 * 1024),
+        ]
+        tasks = [{
+            "infohash": HASH,
+            "show": "佐藤同学",
+            "season": 1,
+            "episode": 2,
+            "title": "佐藤同学 - 02",
+            "folder": "/inbox",
+            "status": "submitted",
+        }]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertEqual(result["moves"][0]["action"], "move")
+        self.assertEqual(result["moves"][0]["name"], video)
+        self.assertEqual(result["moves"][0]["reason"], "ok")
+
     def test_flatten_does_nothing_when_all_collision(self):
         session = _Fake()
         session.dirs["/inbox"] = [Node("/inbox/show", "show", True)]
@@ -575,7 +608,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.11")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.12")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress"):

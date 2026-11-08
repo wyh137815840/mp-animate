@@ -11,7 +11,7 @@ from .anime_flatten import Node, apply_proposals, propose
 from .anime_names import Show, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
 
 
-SUB_EXTS = {".ass", ".srt", ".ssa", ".sup"}
+SUB_EXTS = {".ass", ".srt", ".ssa", ".sup", ".sub", ".idx", ".vtt"}
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".ts", ".m2ts"}
 _SHOW_YEAR = re.compile(r"^(.+?) [(（](\d{4})[)）]$")
 
@@ -136,69 +136,77 @@ def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
     organized = skipped = failed = 0
     _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=0, total=len(work), organized=0, skipped=0, failed=0, current="", result="")
     for index, task in enumerate(work, start=1):
-        folder = task.get("folder") or ""
-        files = _flatten_list(session, folder, depth=3)
-        decision = _decide_move(task, files, library)
-        moves.append(decision)
-        title = task.get("title") or task.get("show") or ""
-        if decision["action"] == "move":
-            show_folder, why = _show_folder(session, library, task.get("show") or "")
-            if why:
-                decision["action"] = "leave"
-                decision["reason"] = why
-            else:
-                season_name = decision["dest_dir"].rsplit("/", 1)[-1]
-                decision["dest_dir"] = join_path(join_path(library, show_folder), season_name)
-        if decision["action"] != "move" or config.dry_run:
-            if decision["action"] == "move":
+        try:
+            _organize_one(task, session, library, config, moves)
+        except Exception:
+            moves.append({"action": "leave", "reason": "整理失败", "task": task.get("infohash"), "nodes": []})
+            _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=index, total=len(work), current=task.get("title") or task.get("show") or "", result="整理失败", organized=organized, skipped=skipped, failed=failed + 1)
+            failed += 1
+        else:
+            last = moves[-1]
+            if last.get("action") == "move" and not config.dry_run and task.get("status") == "moved":
                 organized += 1
-                mark = "ok"
+            elif last.get("action") == "move" and config.dry_run:
+                organized += 1
+            elif last.get("reason") in {"建不了目标目录", "移动失败", "整理失败"}:
+                failed += 1
             else:
                 skipped += 1
-                mark = decision.get("reason") or "跳过"
-            _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=index, total=len(work), current=title, result=mark, organized=organized, skipped=skipped, failed=failed)
-            continue
-        dest_dir = decision["dest_dir"]
-        try:
-            made = session.ensure_dir(dest_dir)
-        except Exception:
-            made = None
-        if made is None or not str(getattr(made, "fileid", "") or ""):
+            _tell(
+                report,
+                job="organize",
+                phase="running",
+                dry_run=config.dry_run,
+                index=index,
+                total=len(work),
+                current=task.get("title") or task.get("show") or "",
+                result="ok" if last.get("action") == "move" else (last.get("reason") or "跳过"),
+                organized=organized,
+                skipped=skipped,
+                failed=failed,
+            )
+    return {"ok": True, "dry_run": config.dry_run, "moves": [_public_move(item) for item in moves]}
+
+
+def _organize_one(task, session, library, config, moves) -> None:
+    folder = task.get("folder") or ""
+    files = _flatten_list(session, folder, depth=3)
+    decision = _decide_move(task, files, library)
+    moves.append(decision)
+    if decision["action"] == "move":
+        show_folder, why = _show_folder(session, library, task.get("show") or "")
+        if why:
             decision["action"] = "leave"
-            decision["reason"] = "建不了目标目录"
-            failed += 1
-            _tell(report, job="organize", phase="running", dry_run=False, index=index, total=len(work), current=title, result="失败", organized=organized, skipped=skipped, failed=failed)
-            continue
-        try:
-            existing = {item.name for item in session.list_dir(dest_dir)}
-        except Exception:
-            existing = set()
-        if decision["name"] in existing:
-            decision["action"] = "leave"
-            decision["reason"] = "collision"
-            skipped += 1
-            _tell(report, job="organize", phase="running", dry_run=False, index=index, total=len(work), current=title, result="跳过", organized=organized, skipped=skipped, failed=failed)
-            continue
-        ok = True
-        try:
-            for item in decision["nodes"]:
-                if not session.move(item, dest_dir, item.name):
-                    ok = False
-                    break
-                session.sleep(config.move_gap_seconds)
-        except Exception:
-            ok = False
-        if ok:
-            task["status"] = "moved"
-            organized += 1
-            mark = "ok"
+            decision["reason"] = why
         else:
+            season_name = decision["dest_dir"].rsplit("/", 1)[-1]
+            decision["dest_dir"] = join_path(join_path(library, show_folder), season_name)
+    if decision["action"] != "move" or config.dry_run:
+        return
+    dest_dir = decision["dest_dir"]
+    try:
+        made = session.ensure_dir(dest_dir)
+    except Exception:
+        made = None
+    if made is None or not str(getattr(made, "fileid", "") or ""):
+        decision["action"] = "leave"
+        decision["reason"] = "建不了目标目录"
+        return
+    try:
+        existing = {item.name for item in session.list_dir(dest_dir)}
+    except Exception:
+        existing = set()
+    if decision["name"] in existing:
+        decision["action"] = "leave"
+        decision["reason"] = "collision"
+        return
+    for item in decision["nodes"]:
+        if not session.move(item, dest_dir, item.name):
             decision["action"] = "leave"
             decision["reason"] = "移动失败"
-            failed += 1
-            mark = "失败"
-        _tell(report, job="organize", phase="running", dry_run=False, index=index, total=len(work), current=title, result=mark, organized=organized, skipped=skipped, failed=failed)
-    return {"ok": True, "dry_run": config.dry_run, "moves": [_public_move(item) for item in moves]}
+            return
+        session.sleep(config.move_gap_seconds)
+    task["status"] = "moved"
 
 
 def run_flatten(session, config: JobConfig, report=None) -> dict:
@@ -447,32 +455,96 @@ def _show_folder(session, library: str, show: str) -> tuple[str, str]:
 
 
 def _is_video_file(item: Node) -> bool:
-    return (not item.is_dir) and _suffix(item.name) in VIDEO_EXTS and "sample" not in item.name.lower()
+    """字幕和同名附属文件不是视频。目录即使名叫 .mkv 也不是。"""
+    if item.is_dir or _is_subtitle(item.name):
+        return False
+    return _suffix(item.name) in VIDEO_EXTS and "sample" not in item.name.lower()
 
 
-def _videos_for_task(videos: list[Node], task: dict) -> list[Node]:
-    """收件箱里有多包时，只留这一集。同名外壳目录不算视频。"""
-    if len(videos) <= 1:
-        return videos
+def _is_subtitle(name: str) -> bool:
+    return _suffix(name) in SUB_EXTS
+
+
+def _episode_of_name(name: str) -> tuple[int, int] | None:
+    """目录名常以 .mkv 结尾。去掉这一层再认集数。"""
+    text = name or ""
+    if _suffix(text) in VIDEO_EXTS or _suffix(text) in SUB_EXTS:
+        text = text.rsplit(".", 1)[0]
+    return parse_episode(text)
+
+
+def _pack_id(path: str, inbox: str) -> str:
+    """收件箱直接下的那一层就是一包。散落的文件算收件箱自己。"""
+    inbox = norm(inbox)
+    parent = parent_path(norm(path))
+    if parent == inbox or norm(path) == inbox:
+        return inbox
+    current = parent
+    while parent_path(current) != inbox and current not in ("", "/"):
+        current = parent_path(current)
+    return current
+
+
+def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
+    """先锁到这一集的包，包内字幕不算视频，再按集数留下一个正片。"""
+    inbox = task.get("folder") or ""
+    videos = [item for item in files if _is_video_file(item)]
+    if not videos:
+        return []
     season = int(task.get("season") or 0)
     episode = int(task.get("episode") or 0)
+    packs = {}
+    for item in files:
+        packs.setdefault(_pack_id(item.path, inbox), []).append(item)
+    chosen_pack = _pack_for_episode(packs, inbox, season, episode, task.get("show") or "")
+    scoped = [item for item in videos if _pack_id(item.path, inbox) == chosen_pack] if chosen_pack else videos
+    if len(scoped) <= 1:
+        return scoped
     if episode <= 0:
+        return scoped
+    matched = [item for item in scoped if _same_episode(_episode_of_name(item.name), season, episode)]
+    if len(matched) == 1:
+        return matched
+    if matched:
+        return _prefer_show(matched, task.get("show") or "")
+    return scoped
+
+
+def _same_episode(parsed: tuple[int, int] | None, season: int, episode: int) -> bool:
+    if parsed is None or parsed[1] != episode:
+        return False
+    return not season or parsed[0] == season
+
+
+def _pack_for_episode(packs: dict, inbox: str, season: int, episode: int, show: str) -> str:
+    if episode <= 0:
+        return ""
+    found = []
+    for pack, items in packs.items():
+        if pack == norm(inbox):
+            continue
+        label = name_of(pack)
+        if _same_episode(_episode_of_name(label), season, episode):
+            found.append(pack)
+            continue
+        for item in items:
+            if _is_video_file(item) and _same_episode(_episode_of_name(item.name), season, episode):
+                found.append(pack)
+                break
+    if len(found) == 1:
+        return found[0]
+    if show and len(found) > 1:
+        narrowed = [pack for pack in found if title_matches(pack, Show(keyword=show))]
+        if len(narrowed) == 1:
+            return narrowed[0]
+    return ""
+
+
+def _prefer_show(videos: list[Node], show: str) -> list[Node]:
+    if not show:
         return videos
-    matched = []
-    for video in videos:
-        parsed = parse_episode(video.name) or parse_episode(video.path)
-        if parsed is None or parsed[1] != episode:
-            continue
-        if season and parsed[0] != season:
-            continue
-        matched.append(video)
-    if len(matched) <= 1:
-        return matched
-    show = Show(keyword=str(task.get("show") or ""))
-    if not show.keyword:
-        return matched
-    narrowed = [video for video in matched if title_matches(f"{video.path} {video.name}", show)]
-    return narrowed or matched
+    narrowed = [video for video in videos if title_matches(f"{video.path} {video.name}", Show(keyword=show))]
+    return narrowed or videos
 
 
 def _task_finished(task: dict) -> bool:
@@ -512,10 +584,7 @@ def _flatten_list(session, root: str, depth: int) -> list[Node]:
 
 
 def _decide_move(task: dict, files: list[Node], library: str) -> dict:
-    videos = _videos_for_task(
-        [item for item in files if _is_video_file(item)],
-        task,
-    )
+    videos = _videos_for_task(files, task)
     if not videos:
         present = [item for item in files if _is_video_file(item)]
         reason = "没有视频" if not present else "集数对不上"
@@ -535,10 +604,12 @@ def _decide_move(task: dict, files: list[Node], library: str) -> dict:
     home = parent_path(video.path)
     sidecars = [
         item for item in files
-        if not item.is_dir
+        if item.path != video.path
+        and not item.is_dir
         and parent_path(item.path) == home
-        and _suffix(item.name) in SUB_EXTS
-        and item.name.rsplit(".", 1)[0] == stem
+        and (_is_subtitle(item.name) or _suffix(item.name) not in VIDEO_EXTS and (
+            item.name.startswith(stem + ".") or item.name.startswith(stem + " ")
+        ))
     ]
     return {
         "action": "move",
