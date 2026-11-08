@@ -33,6 +33,7 @@ from anime115.anime_config import PLAY_BASE, offline_directory, usable_cookie  #
 from anime115.anime_jobs import _finished_hashes  # noqa: E402
 from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix, title_matches  # noqa: E402
 from anime115.anime_pan import CookieSession, Pan115  # noqa: E402
+from anime115.anime_progress import advance, format_progress, format_state  # noqa: E402
 from anime115.anime_tmdb import match_tv_id, progress_from_season, resolve_tv_id  # noqa: E402
 
 
@@ -404,6 +405,49 @@ class CookiePanTest(unittest.TestCase):
         self.assertFalse(any("/open/" in call[1] for call in http.calls))
 
 
+class ProgressTest(unittest.TestCase):
+    def test_overview_lines_for_preview_and_live(self):
+        preview = advance({}, {
+            "job": "daily",
+            "phase": "running",
+            "dry_run": True,
+            "index": 2,
+            "total": 5,
+            "current": "女友的朋友 05",
+            "result": "跳过",
+            "queued": 3,
+            "submitted": 0,
+            "skipped": 2,
+            "failed": 0,
+        })
+        self.assertEqual(format_state(preview), "状态：进行中（预览）")
+        self.assertEqual(
+            format_progress(preview),
+            "进度：每日 2/5：女友的朋友 05，跳过。排队 3，已提交 0，跳过 2，失败 0",
+        )
+        done = advance(preview, {"phase": "done"})
+        self.assertEqual(done["state"], "状态：已完成（预览）")
+        live = advance({}, {
+            "job": "organize",
+            "phase": "running",
+            "dry_run": False,
+            "index": 4,
+            "total": 4,
+            "current": "佐藤同学 - 03",
+            "result": "ok",
+            "organized": 3,
+            "skipped": 1,
+            "failed": 0,
+        })
+        self.assertEqual(format_state(live), "状态：进行中（正式）")
+        self.assertEqual(
+            format_progress(live),
+            "进度：整理 4/4：佐藤同学 - 03，ok。已整理 3，跳过 1，失败 0",
+        )
+        self.assertEqual(format_state({}), "状态：空闲")
+        self.assertEqual(format_progress({}), "进度：还没有运行记录")
+
+
 class ImportTest(unittest.TestCase):
     def test_package_import_leaves_no_bare_module(self):
         app = types.ModuleType("app")
@@ -443,12 +487,12 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.8")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.9")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
-        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan"):
+        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress"):
             self.assertNotIn(name, sys.modules)
-        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan"):
+        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress"):
             self.assertIn(f"app.plugins.anime115.{name}", sys.modules)
         _form, defaults = plugin.Anime115.get_form(None)
         for key in ("cookie", "offline_dir", "strm_root", "play_base", "storage"):

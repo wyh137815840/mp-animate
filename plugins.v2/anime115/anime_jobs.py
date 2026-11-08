@@ -33,9 +33,10 @@ class JobConfig:
     min_episode_mb: int = 80
 
 
-def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig) -> dict:
+def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None) -> dict:
     """搜索并在非预览时提交离线。预览不写 seen。"""
     if not shows:
+        _tell(report, job="daily", phase="failed", dry_run=config.dry_run, index=0, total=0, current="", result="失败", failed=1)
         return {"ok": False, "error": "未配置追更", "picks": [], "dry_run": config.dry_run}
     inbox = _dated_inbox(config, now)
     picks, notes = select_shows(shows, entries_of, config.search, now)
@@ -47,7 +48,23 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
         chosen.append(pick)
     chosen = chosen[: config.max_submit_per_run]
     submitted = []
+    step, skipped, failed = _walk_notes(report, "daily", config.dry_run, notes, len(chosen))
     if config.dry_run:
+        for offset, pick in enumerate(chosen):
+            _tell(
+                report,
+                job="daily",
+                phase="running",
+                dry_run=True,
+                index=step + offset + 1,
+                total=step + len(chosen),
+                current=pick.torrent.title,
+                result="ok",
+                queued=len(chosen),
+                submitted=0,
+                skipped=skipped,
+                failed=failed,
+            )
         return {
             "ok": True,
             "dry_run": True,
@@ -72,13 +89,18 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
             session.sleep(config.offline_gap_seconds)
         result = session.add_offline(pick.torrent.magnet, fileid)
         if not _accepted(result):
+            failed += 1
             notes.append({"show": pick.show, "title": pick.torrent.title, "reason": "离线提交失败"})
+            _tell_daily(report, step + index + 1, step + len(chosen), pick.torrent.title, "失败", len(chosen) - index - 1, len(submitted), skipped, failed)
             continue
         if _landed_in_cloud_download(result):
+            failed += 1
             notes.append({"show": pick.show, "title": pick.torrent.title, "reason": "落到了云下载"})
+            _tell_daily(report, step + index + 1, step + len(chosen), pick.torrent.title, "失败", len(chosen) - index - 1, len(submitted), skipped, failed)
             continue
         _remember(seen, pick, now, inbox)
         submitted.append(_pick_row(pick))
+        _tell_daily(report, step + index + 1, step + len(chosen), pick.torrent.title, "ok", len(chosen) - len(submitted), len(submitted), skipped, failed)
         if quota is not None:
             quota -= 1
     return {
@@ -91,7 +113,7 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
     }
 
 
-def run_organize(tasks, session, config: JobConfig) -> dict:
+def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
     """只整理本插件提交过、且离线列表里已经完成的任务。"""
     library = strip_mount_prefix(config.library_root, config.mount_prefix) if config.library_root else ""
     if not library or library == "/":
@@ -99,7 +121,7 @@ def run_organize(tasks, session, config: JobConfig) -> dict:
     if not session.check_login():
         return {"ok": False, "error": "115 未登录", "moves": [], "dry_run": config.dry_run}
     done = _finished_hashes(session)
-    moves = []
+    work = []
     for task in tasks:
         if task.get("status") == "moved":
             continue
@@ -107,21 +129,38 @@ def run_organize(tasks, session, config: JobConfig) -> dict:
             continue
         if config.dry_run and task.get("infohash") not in done:
             continue
+        work.append(task)
+    moves = []
+    organized = skipped = failed = 0
+    _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=0, total=len(work), organized=0, skipped=0, failed=0, current="", result="")
+    for index, task in enumerate(work, start=1):
         folder = task.get("folder") or ""
         files = _flatten_list(session, folder, depth=3)
         decision = _decide_move(task, files, library)
         moves.append(decision)
-        if config.dry_run or decision["action"] != "move":
+        title = task.get("title") or task.get("show") or ""
+        if decision["action"] != "move" or config.dry_run:
+            if decision["action"] == "move":
+                organized += 1
+                mark = "ok"
+            else:
+                skipped += 1
+                mark = "跳过"
+            _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=index, total=len(work), current=title, result=mark, organized=organized, skipped=skipped, failed=failed)
             continue
         dest_dir = decision["dest_dir"]
         if session.ensure_dir(dest_dir) is None:
             decision["action"] = "leave"
             decision["reason"] = "建不了目标目录"
+            failed += 1
+            _tell(report, job="organize", phase="running", dry_run=False, index=index, total=len(work), current=title, result="失败", organized=organized, skipped=skipped, failed=failed)
             continue
         existing = {item.name for item in session.list_dir(dest_dir)}
         if decision["name"] in existing:
             decision["action"] = "leave"
             decision["reason"] = "collision"
+            skipped += 1
+            _tell(report, job="organize", phase="running", dry_run=False, index=index, total=len(work), current=title, result="跳过", organized=organized, skipped=skipped, failed=failed)
             continue
         ok = True
         for item in decision["nodes"]:
@@ -131,13 +170,18 @@ def run_organize(tasks, session, config: JobConfig) -> dict:
             session.sleep(config.move_gap_seconds)
         if ok:
             task["status"] = "moved"
+            organized += 1
+            mark = "ok"
         else:
             decision["action"] = "leave"
             decision["reason"] = "移动失败"
+            failed += 1
+            mark = "失败"
+        _tell(report, job="organize", phase="running", dry_run=False, index=index, total=len(work), current=title, result=mark, organized=organized, skipped=skipped, failed=failed)
     return {"ok": True, "dry_run": config.dry_run, "moves": [_public_move(item) for item in moves]}
 
 
-def run_flatten(session, config: JobConfig) -> dict:
+def run_flatten(session, config: JobConfig, report=None) -> dict:
     """先分类。安全移动为 0，或预览、或没开摊平落盘时，不移动。"""
     roots = [strip_mount_prefix(item, config.mount_prefix) for item in config.flatten_roots if str(item).strip()]
     roots = [norm(item) for item in roots]
@@ -154,8 +198,24 @@ def run_flatten(session, config: JobConfig) -> dict:
     if moved:
         _delete_empty(session, proposals, set(roots))
     counts = {"ok_eligible_non_collision": 0, "collision": 0, "uncertain": 0, "skip": 0}
-    for item in proposals:
+    skipped = 0
+    for index, item in enumerate(proposals, start=1):
         counts[item.kind] = counts.get(item.kind, 0) + 1
+        if item.kind != "ok_eligible_non_collision":
+            skipped += 1
+        _tell(
+            report,
+            job="flatten",
+            phase="running",
+            dry_run=not apply,
+            index=index,
+            total=len(proposals),
+            current=name_of(item.source),
+            result="ok" if item.kind == "ok_eligible_non_collision" else "跳过",
+            moved=moved if index == len(proposals) else 0,
+            skipped=skipped,
+            failed=0,
+        )
     return {
         "ok": True,
         "dry_run": not apply,
@@ -166,6 +226,50 @@ def run_flatten(session, config: JobConfig) -> dict:
             for item in proposals[:200]
         ],
     }
+
+
+def _tell(report, **fields) -> None:
+    if report:
+        report(fields)
+
+
+def _tell_daily(report, index, total, title, result, queued, submitted, skipped, failed) -> None:
+    _tell(
+        report,
+        job="daily",
+        phase="running",
+        dry_run=False,
+        index=index,
+        total=total,
+        current=title,
+        result=result,
+        queued=queued,
+        submitted=submitted,
+        skipped=skipped,
+        failed=failed,
+    )
+
+
+def _walk_notes(report, job, dry_run, notes, queued) -> tuple[int, int, int]:
+    _tell(report, job=job, phase="running", dry_run=dry_run, index=0, total=len(notes) + queued, current="", result="", queued=queued, submitted=0, organized=0, moved=0, skipped=0, failed=0)
+    skipped = 0
+    for index, note in enumerate(notes, start=1):
+        skipped += 1
+        _tell(
+            report,
+            job=job,
+            phase="running",
+            dry_run=dry_run,
+            index=index,
+            total=len(notes) + queued,
+            current=note.get("title") or note.get("show") or "",
+            result=note.get("reason") or "跳过",
+            queued=queued,
+            submitted=0,
+            skipped=skipped,
+            failed=0,
+        )
+    return len(notes), skipped, 0
 
 
 def _dated_inbox(config: JobConfig, now: datetime) -> str:

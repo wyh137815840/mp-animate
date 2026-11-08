@@ -14,6 +14,7 @@ from app.plugins import _PluginBase
 
 from .anime_config import PLAY_BASE, offline_directory, usable_cookie
 from .anime_pan import CookieSession
+from .anime_progress import advance, format_progress, format_state
 from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
 from .anime_flatten import Node
 from .anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize
@@ -35,7 +36,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -259,9 +260,11 @@ class Anime115(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        """最近一次结果。"""
-        running = hasattr(self, "_lock") and self._lock.locked()
-        text = ("正在运行。\n" if running else "") + self._page_text()
+        """详情页。开头两行是进度和状态，下面是本轮条目。"""
+        text = self._overview_text()
+        detail = self._page_text()
+        if detail:
+            text = text + "\n" + detail
         return [{
             "component": "VAlert",
             "props": {
@@ -290,8 +293,15 @@ class Anime115(_PluginBase):
         return {"ok": True, "message": "已开始", "job": name}
 
     def api_status(self) -> dict:
-        """最近一次摘要。"""
-        return self.get_data("last_run") or {"ok": False, "error": "还没有运行记录"}
+        """最近一次摘要，带上和详情页一样的进度、状态两行。"""
+        payload = dict(self.get_data("last_run") or {})
+        overview = self._progress_snapshot()
+        if overview:
+            payload["progress"] = overview.get("progress")
+            payload["state"] = overview.get("state")
+        if not payload:
+            return {"ok": False, "error": "还没有运行记录", "state": format_state(None), "progress": format_progress(None)}
+        return payload
 
     def run_daily(self) -> dict:
         """搜动漫花园，预览或提交离线。"""
@@ -315,6 +325,13 @@ class Anime115(_PluginBase):
             payload = func()
             payload["job"] = kind
             payload["finished_at"] = _now()
+            self._report({
+                "job": kind,
+                "phase": "done" if payload.get("ok") else "failed",
+                "dry_run": bool(payload.get("dry_run", self._dry_run)),
+            })
+            payload["progress"] = self._progress.get("progress")
+            payload["state"] = self._progress.get("state")
             self.save_data("last_run", payload)
             self._push_history(payload)
             self._announce(payload)
@@ -322,7 +339,15 @@ class Anime115(_PluginBase):
             return payload
         except Exception as exc:
             logger.error(f"动漫 115 {kind} 失败：{exc}", exc_info=True)
-            payload = {"ok": False, "job": kind, "error": str(exc), "finished_at": _now()}
+            self._report({"job": kind, "phase": "failed", "dry_run": self._dry_run, "result": "失败"})
+            payload = {
+                "ok": False,
+                "job": kind,
+                "error": str(exc),
+                "finished_at": _now(),
+                "progress": self._progress.get("progress"),
+                "state": self._progress.get("state"),
+            }
             self.save_data("last_run", payload)
             return payload
         finally:
@@ -343,6 +368,7 @@ class Anime115(_PluginBase):
             seen,
             moment,
             config,
+            report=self._report,
         )
         if not result.get("dry_run") and result.get("ok"):
             self.save_data("seen", seen)
@@ -353,13 +379,13 @@ class Anime115(_PluginBase):
 
     def _organize(self) -> dict:
         tasks = list(self.get_data("tasks") or [])
-        result = run_organize(tasks, self._session(), self._config())
+        result = run_organize(tasks, self._session(), self._config(), report=self._report)
         if not result.get("dry_run") and result.get("ok"):
             self.save_data("tasks", tasks)
         return result
 
     def _flatten(self) -> dict:
-        return run_flatten(self._session(), self._config())
+        return run_flatten(self._session(), self._config(), report=self._report)
 
     def _config(self) -> JobConfig:
         prefer = [item.strip() for item in self._fansub_prefer.split(",") if item.strip()]
@@ -391,6 +417,28 @@ class Anime115(_PluginBase):
             move_gap_seconds=self._move_gap_seconds,
             min_episode_mb=self._min_episode_mb,
         )
+
+    def _report(self, patch: dict) -> None:
+        """刷新详情页开头的进度和状态。"""
+        self._progress = advance(getattr(self, "_progress", None), patch)
+        try:
+            self.save_data("progress", self._progress)
+        except Exception:
+            return
+
+    def _progress_snapshot(self) -> dict:
+        current = getattr(self, "_progress", None)
+        if current:
+            return current
+        try:
+            saved = self.get_data("progress") or {}
+        except Exception:
+            saved = {}
+        return saved if isinstance(saved, dict) else {}
+
+    def _overview_text(self) -> str:
+        snap = self._progress_snapshot()
+        return f"{snap.get('progress') or format_progress(snap)}\n{snap.get('state') or format_state(snap)}"
 
     def _cookie_value(self) -> str:
         """填了 UID= 才算 Cookie。留空则调用方改用已登录存储。"""
