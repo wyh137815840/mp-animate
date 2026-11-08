@@ -19,6 +19,8 @@ class Show:
     keyword: str
     aliases: list[str] = field(default_factory=list)
     groups: list[str] = field(default_factory=list)
+    tmdb_id: int | None = None
+    airing: bool = False
 
     def names(self) -> list[str]:
         """搜索词和别名，长的排前面，避免短别名先命中。"""
@@ -27,7 +29,7 @@ class Show:
 
 
 def parse_watchlist(text: str) -> list[Show]:
-    """解析多行追更。`剧名 | 别名 | group=字幕组`。`#` 开头是注释。"""
+    """解析多行追更。`剧名 | 别名 | group=字幕组 | tmdb_id=编号 | 连载中`。`#` 开头是注释。"""
     shows = []
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -39,14 +41,23 @@ def parse_watchlist(text: str) -> list[Show]:
             continue
         aliases = []
         groups = []
+        tmdb_id = None
+        airing = False
         for part in parts[1:]:
             if not part:
                 continue
-            if part.lower().startswith("group="):
+            lowered = part.casefold()
+            if lowered.startswith("group="):
                 groups.extend(item.strip() for item in part.split("=", 1)[1].split(",") if item.strip())
+            elif lowered.startswith("tmdb_id=") or lowered.startswith("tmdb="):
+                token = part.split("=", 1)[1].strip()
+                if token.isdigit():
+                    tmdb_id = int(token)
+            elif part == "连载中" or lowered == "airing":
+                airing = True
             else:
                 aliases.append(part)
-        shows.append(Show(keyword=keyword, aliases=aliases, groups=groups))
+        shows.append(Show(keyword=keyword, aliases=aliases, groups=groups, tmdb_id=tmdb_id, airing=airing))
     return shows
 
 
@@ -119,6 +130,8 @@ def parse_episode(title: str) -> tuple[int, int] | None:
         episodes.add(int(spoken.group(1)))
     for dashed in re.finditer(r"[-–]\s*(\d{1,3})(?:\s*v\d+)?(?=\s|\[|【|$)", text, re.IGNORECASE):
         episodes.add(int(dashed.group(1)))
+    for bracket in re.finditer(r"\[(\d{1,3})(?:\s*v\d+)?\]", text, re.IGNORECASE):
+        episodes.add(int(bracket.group(1)))
     if len(episodes) != 1:
         return None
     if len(seasons) > 1:

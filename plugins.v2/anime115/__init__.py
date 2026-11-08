@@ -16,6 +16,7 @@ from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse
 from .anime_flatten import Node
 from .anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize
 from .anime_names import Show, norm, parse_watchlist
+from .anime_tmdb import live_bounds, shanghai_today
 
 
 class Anime115(_PluginBase):
@@ -24,7 +25,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -56,6 +57,7 @@ class Anime115(_PluginBase):
     _max_submit_per_run = 10
     _move_gap_seconds = 2
     _flatten_max_moves = 30
+    _tmdb_api_key = ""
 
     def init_plugin(self, config: dict = None):
         """读配置。勾了立即运行就跑一次每日任务。"""
@@ -91,6 +93,7 @@ class Anime115(_PluginBase):
         self._max_submit_per_run = _as_int(config.get("max_submit_per_run"), 10)
         self._move_gap_seconds = _as_int(config.get("move_gap_seconds"), 2)
         self._flatten_max_moves = _as_int(config.get("flatten_max_moves"), 30)
+        self._tmdb_api_key = str(config.get("tmdb_api_key") or "").strip()
         if self._onlyonce:
             self._onlyonce = False
             config["onlyonce"] = False
@@ -191,7 +194,8 @@ class Anime115(_PluginBase):
                             _field(6, "mount_prefix", "挂载前缀", "/115open，只用来剥路径"),
                             _field(6, "library_root", "库根", "/动漫"),
                             _field(6, "fansub_prefer", "优先字幕组", "多个用逗号"),
-                            _area("watchlist", "追更，每行一部", "剧名 | 别名 | group=字幕组"),
+                            _area("watchlist", "追更，每行一部", "剧名 | 别名 | group=字幕组 | tmdb_id=编号 | 连载中"),
+                            _field(6, "tmdb_api_key", "TMDB API Key", "v3 密钥，留空则用 MoviePilot 的 TMDB_API_KEY", secret=True),
                             _area("flatten_roots", "摊平目录，每行一个", "/离线下载/动漫"),
                             _field(3, "min_episode_mb", "最小体积(MB)", "80"),
                             _field(3, "max_episode_gb", "最大体积(GB)", "8"),
@@ -220,6 +224,7 @@ class Anime115(_PluginBase):
             "library_root": "",
             "fansub_prefer": "",
             "watchlist": "",
+            "tmdb_api_key": "",
             "flatten_roots": "",
             "min_episode_mb": 80,
             "max_episode_gb": 8,
@@ -303,13 +308,15 @@ class Anime115(_PluginBase):
         tasks = list(self.get_data("tasks") or [])
         moment = datetime.now().astimezone()
         gap = {"done": False}
+        config = self._config()
+        config.search.bounds_of = live_bounds(self._tmdb_api_key, shanghai_today(moment))
         result = run_daily(
             shows,
             _Mp115(self._storage, self._cancel),
             lambda show: _entries_for(show, self._stopped, gap),
             seen,
             moment,
-            self._config(),
+            config,
         )
         if not result.get("dry_run") and result.get("ok"):
             self.save_data("seen", seen)
@@ -546,13 +553,16 @@ def _switch(cols: int, model: str, label: str) -> dict:
     }
 
 
-def _field(cols: int, model: str, label: str, placeholder: str) -> dict:
+def _field(cols: int, model: str, label: str, placeholder: str, secret: bool = False) -> dict:
+    props = {"model": model, "label": label, "placeholder": placeholder}
+    if secret:
+        props["type"] = "password"
     return {
         "component": "VCol",
         "props": {"cols": 12, "md": cols},
         "content": [{
             "component": "VTextField",
-            "props": {"model": model, "label": label, "placeholder": placeholder},
+            "props": props,
         }],
     }
 

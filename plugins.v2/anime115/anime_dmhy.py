@@ -56,6 +56,7 @@ class SearchOptions:
     min_episode_mb: int = 80
     max_episode_gb: int = 8
     fansub_prefer: list[str] = field(default_factory=list)
+    bounds_of: Callable[[Show, int], tuple[int, int | None] | None] | None = None
 
 
 @dataclass
@@ -206,6 +207,15 @@ def select_one(
             notes.append({"show": show.keyword, "title": torrent.title, "reason": "集数不确定"})
             continue
         season, episode = parsed
+        progress = options.bounds_of(show, season) if options.bounds_of else None
+        if progress is not None:
+            count, last_aired = progress
+            if count and episode > count:
+                notes.append({"show": show.keyword, "title": torrent.title, "reason": "超出季集数"})
+                continue
+            if show.airing and last_aired is not None and episode > last_aired:
+                notes.append({"show": show.keyword, "title": torrent.title, "reason": "尚未播出"})
+                continue
         pick = Pick(show.keyword, season, episode, torrent, score)
         current = best.get((season, episode))
         if current is None or _better(pick, current):

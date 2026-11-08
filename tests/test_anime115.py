@@ -6,7 +6,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import ProxyHandler
 
@@ -30,6 +30,7 @@ from anime115.anime_dmhy import (  # noqa: E402
 from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
 from anime115.anime_jobs import JobConfig, run_daily, run_flatten, run_organize  # noqa: E402
 from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix  # noqa: E402
+from anime115.anime_tmdb import match_tv_id, progress_from_season, resolve_tv_id  # noqa: E402
 
 
 NOW = datetime(2026, 11, 8, 10, 0, tzinfo=timezone.utc)
@@ -49,6 +50,18 @@ class NamesTest(unittest.TestCase):
         self.assertEqual(parse_episode("Show S02E04"), (2, 4))
         self.assertIsNone(parse_episode("Show OVA"))
         self.assertIsNone(parse_episode("Show - 03 - 04"))
+        self.assertIsNone(parse_episode("Show [1080P][8bit]"))
+        girlfriend = "【今晚月色真美】[女友的朋友 / 彼女の友達 / Kanojo no Tomodachi][05][WebRip][1080P][AVC-8bit][AAC]"
+        self.assertEqual(parse_episode(girlfriend), (1, 5))
+        self.assertEqual(parse_episode("【今晚月色真美】[女友的朋友][01v2][WebRip][1080P]"), (1, 1))
+        self.assertIsNone(parse_episode("女友的朋友 - 05 [06]"))
+
+    def test_watchlist_tmdb_and_airing(self):
+        shows = parse_watchlist("女友的朋友 | 彼女の友達 | tmdb_id=336654 | 连载中 | group=今晚月色真美\n")
+        self.assertEqual(shows[0].tmdb_id, 336654)
+        self.assertTrue(shows[0].airing)
+        self.assertEqual(shows[0].aliases, ["彼女の友達"])
+        self.assertEqual(shows[0].groups, ["今晚月色真美"])
 
 
 class ScoreTest(unittest.TestCase):
@@ -177,6 +190,27 @@ File size : 435 MiB</description>
         self.assertEqual(reasons[tiny.title], "体积过小")
         self.assertEqual(reasons[huge.title], "体积过大")
 
+    def test_bracket_episode_and_airing_cap(self):
+        show = parse_watchlist("女友的朋友 | tmdb_id=336654 | 连载中")[0]
+        options = SearchOptions(
+            min_episode_mb=20,
+            max_episode_gb=8,
+            require_sub=False,
+            bounds_of=lambda _show, _season: (12, 5),
+        )
+        ready = "【今晚月色真美】[女友的朋友][05][WebRip][1080P]"
+        future = "【今晚月色真美】[女友的朋友][06][WebRip][1080P]"
+        beyond = "【今晚月色真美】[女友的朋友][14][WebRip][1080P]"
+
+        def item(title, digest):
+            return Torrent(title, digest, "magnet:?xt=urn:btih:" + digest, int(round(121.5 * 1024 ** 2)), NOW)
+
+        picks, notes = select_one(show, [item(ready, "d" * 40), item(future, "e" * 40), item(beyond, "f" * 40)], options, NOW)
+        self.assertEqual([pick.episode for pick in picks], [5])
+        reasons = {note["title"]: note["reason"] for note in notes}
+        self.assertEqual(reasons[future], "尚未播出")
+        self.assertEqual(reasons[beyond], "超出季集数")
+
 
 class FlattenTest(unittest.TestCase):
     def test_same_name_lift_and_collision_gate(self):
@@ -286,6 +320,34 @@ class JobTest(unittest.TestCase):
         self.assertEqual(session.moves, [])
 
 
+class TmdbTest(unittest.TestCase):
+    def test_season_progress_uses_air_dates(self):
+        payload = {
+            "episodes": [
+                {"episode_number": number, "air_date": f"2026-10-{number:02d}"}
+                for number in range(1, 6)
+            ] + [
+                {"episode_number": 6, "air_date": "2026-11-09"},
+                {"episode_number": 12, "air_date": "2026-12-21"},
+            ]
+        }
+        progress = progress_from_season(payload, date(2026, 11, 8))
+        self.assertEqual(progress.episode_count, 12)
+        self.assertEqual(progress.last_aired, 5)
+
+    def test_name_search_requires_exact_title(self):
+        results = [
+            {"id": 1, "name": "别的朋友", "original_name": "Other"},
+            {"id": 336654, "name": "女友的朋友", "original_name": "彼女の友達"},
+        ]
+        self.assertEqual(match_tv_id(results, ["女友的朋友"]), 336654)
+        self.assertIsNone(match_tv_id(results, ["朋友"]))
+        show = parse_watchlist("女友的朋友 | 连载中")[0]
+        self.assertEqual(resolve_tv_id(show, lambda _name: results), 336654)
+        pinned = parse_watchlist("女友的朋友 | tmdb_id=316891")[0]
+        self.assertEqual(resolve_tv_id(pinned, lambda _name: []), 316891)
+
+
 class ImportTest(unittest.TestCase):
     def test_package_import_leaves_no_bare_module(self):
         app = types.ModuleType("app")
@@ -325,12 +387,12 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.4")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.5")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
-        for name in ("anime_names", "anime_jobs", "anime_flatten"):
+        for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb"):
             self.assertNotIn(name, sys.modules)
-        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten"):
+        for name in ("anime_dmhy", "anime_names", "anime_jobs", "anime_flatten", "anime_tmdb"):
             self.assertIn(f"app.plugins.anime115.{name}", sys.modules)
         self.assertIs(plugin.parse_rss, sys.modules["app.plugins.anime115.anime_dmhy"].parse_rss)
 
