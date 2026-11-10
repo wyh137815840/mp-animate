@@ -91,13 +91,24 @@ class Pan115:
         return result if isinstance(result, dict) else {}
 
     def list_tasks(self, page: int = 1) -> dict:
-        """云下载任务列表，收成和开放平台一样的 data.tasks。"""
+        """云下载任务列表，收成和开放平台一样的 data.tasks。页码信息留下，整理才能翻完。"""
         client = self._client_factory(self.cookie)
         method = getattr(client, "clouddownload_task_list", None)
         if method is None:
             raise RuntimeError("p115client 没有 clouddownload_task_list")
-        payload = method({"page": page})
-        return {"data": {"tasks": _task_rows(payload)}}
+        payload = method({"page": page}) or {}
+        data = {"tasks": _task_rows(payload)}
+        sources = []
+        if isinstance(payload, dict):
+            sources.append(payload)
+            inner = payload.get("data")
+            if isinstance(inner, dict):
+                sources.append(inner)
+        for source in sources:
+            for key in ("page", "page_count", "count"):
+                if key in source and key not in data:
+                    data[key] = source[key]
+        return {"data": data}
 
     def _child_dir(self, path: str, parent: str, name: str, fresh: bool = False) -> str:
         if not fresh and path in self._dirs:

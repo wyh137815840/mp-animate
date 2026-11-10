@@ -123,30 +123,40 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
     }
 
 
-def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
-    """只整理本插件提交过、且离线列表里已经完成的任务。"""
+def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> dict:
+    """整理本插件提交过的任务。
+
+    完成可以来自整份离线列表，不限前 5 页。列表已经翻完、任务却不在里面时，
+    仍按提交时记下的日期收件箱整理。列表里还在下载或失败的不动。
+    """
     library = strip_mount_prefix(config.library_root, config.mount_prefix) if config.library_root else ""
     if not library or library == "/":
         return {"ok": False, "error": "没有填写库根", "moves": [], "dry_run": config.dry_run}
     if not session.check_login():
         return {"ok": False, "error": "115 未登录", "moves": [], "dry_run": config.dry_run}
-    done = _finished_tasks(session)
+    _include_seen(tasks, seen)
+    listed, complete = _offline_index(session)
     work = []
     for task in tasks:
-        if task.get("status") == "moved":
+        if not isinstance(task, dict) or task.get("status") == "moved":
             continue
         infohash = str(task.get("infohash") or "").lower()
-        if infohash not in done and not config.dry_run:
+        if not infohash:
             continue
-        if config.dry_run and infohash not in done:
+        offline = listed.get(infohash)
+        if offline is not None:
+            if not _task_finished(offline):
+                continue
+            work.append((task, offline))
             continue
-        work.append(task)
+        if complete:
+            work.append((task, {}))
     moves = []
     organized = skipped = failed = 0
     _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=0, total=len(work), organized=0, skipped=0, failed=0, current="", result="")
-    for index, task in enumerate(work, start=1):
+    for index, pair in enumerate(work, start=1):
+        task, offline = pair
         try:
-            offline = done.get(str(task.get("infohash") or "").lower()) or {}
             _organize_one(task, session, library, config, moves, offline)
         except Exception:
             moves.append({"action": "leave", "reason": "整理失败", "task": task.get("infohash"), "nodes": []})
@@ -175,7 +185,15 @@ def run_organize(tasks, session, config: JobConfig, report=None) -> dict:
                 skipped=skipped,
                 failed=failed,
             )
-    return {"ok": True, "dry_run": config.dry_run, "moves": [_public_move(item) for item in moves]}
+    seen_changed = False
+    if not config.dry_run:
+        seen_changed = _mark_seen_moved(tasks, seen)
+    return {
+        "ok": True,
+        "dry_run": config.dry_run,
+        "moves": [_public_move(item) for item in moves],
+        "seen_changed": seen_changed,
+    }
 
 
 def _organize_one(task, session, library, config, moves, offline=None) -> None:
@@ -407,6 +425,7 @@ def _remember(seen: dict, pick: Pick, now: datetime, folder: str) -> None:
         "episode": pick.episode,
         "status": "submitted",
         "folder": folder,
+        "title": pick.torrent.title,
     }
     episodes[key] = pick.torrent.infohash
 
@@ -465,25 +484,144 @@ def _landed_in_cloud_download(payload) -> bool:
     return "云下载" in text and "/离线下载/" not in text
 
 
+# 开放平台 get_task_list 不带 page_count 时，一页满 20 条就还有下一页。
+_OFFLINE_PAGE_SIZE = 20
+_OFFLINE_PAGE_LIMIT = 200
+
+
 def _finished_hashes(session) -> set[str]:
     return set(_finished_tasks(session))
 
 
 def _finished_tasks(session) -> dict[str, dict]:
     """已完成的离线任务，按 infohash 记下名字和 file_id，用来认自己的那一包。"""
-    found = {}
-    for page in range(1, 6):
-        payload = session.list_offline(page)
-        tasks = _task_rows(payload)
-        if not tasks:
-            break
-        for task in tasks:
+    listed, _complete = _offline_index(session)
+    return {infohash: task for infohash, task in listed.items() if _task_finished(task)}
+
+
+def _offline_index(session) -> tuple[dict[str, dict], bool]:
+    """整份离线列表，不在第 5 页停下。
+
+    第二个值表示列表有没有看完。看完了，不在列表里的提交才按收件箱整理。
+    没看完时，没见到的任务先留着，避免把还在下载的文件搬走。
+    """
+    found: dict[str, dict] = {}
+    for page in range(1, _OFFLINE_PAGE_LIMIT + 1):
+        try:
+            payload = session.list_offline(page)
+        except Exception:
+            if page == 1:
+                raise
+            return found, False
+        rows = [item for item in _task_rows(payload) if isinstance(item, dict)]
+        if not rows:
+            return found, True
+        added = 0
+        for task in rows:
             infohash = str(task.get("info_hash") or task.get("infohash") or "").lower()
-            if infohash and _task_finished(task):
-                found[infohash] = task
-        if len(tasks) < 20:
-            break
-    return found
+            if not infohash or infohash in found:
+                continue
+            found[infohash] = task
+            added += 1
+        page_count = _meta_int(payload, ("page_count", "pageCount", "total_page", "pages"))
+        total = _meta_int(payload, ("count", "total", "total_count", "task_count"))
+        if page_count is not None and page >= page_count:
+            return found, True
+        # count 若只等于本页条数，它不是总任务数，不能在这里把列表当成已经看完。
+        if total and len(found) >= total and total > len(rows):
+            return found, True
+        if page_count is None and total is None and len(rows) < _OFFLINE_PAGE_SIZE:
+            return found, True
+        if added == 0:
+            # 满页又没有总页数，说明翻页没有前进，后面的任务可能还没看到。
+            if page_count is None and len(rows) >= _OFFLINE_PAGE_SIZE:
+                return found, False
+            if page_count is not None and page < page_count:
+                return found, False
+            return found, True
+    return found, False
+
+
+def _meta_int(payload, keys: tuple[str, ...]) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    sources = [payload]
+    data = payload.get("data")
+    if isinstance(data, dict):
+        sources.append(data)
+    for source in sources:
+        for key in keys:
+            number = _plain_int(source.get(key))
+            if number is not None:
+                return number
+    return None
+
+
+def _plain_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _include_seen(tasks, seen) -> None:
+    """tasks 里没有、但 seen 里还记着的提交，也拿去对收件箱。"""
+    if not isinstance(tasks, list) or not isinstance(seen, dict):
+        return
+    known = {
+        str(item.get("infohash") or "").lower()
+        for item in tasks
+        if isinstance(item, dict)
+    }
+    hashes = seen.get("hashes")
+    if not isinstance(hashes, dict):
+        return
+    for infohash, row in hashes.items():
+        key = str(infohash or "").lower()
+        if not key or key in known or not isinstance(row, dict):
+            continue
+        if row.get("status") == "moved":
+            continue
+        folder = str(row.get("folder") or "").strip()
+        if not folder:
+            continue
+        tasks.append({
+            "infohash": key,
+            "show": row.get("show") or "",
+            "season": _number(row.get("season")),
+            "episode": _number(row.get("episode")),
+            "title": row.get("title") or row.get("show") or "",
+            "folder": folder,
+            "status": row.get("status") or "submitted",
+        })
+        known.add(key)
+
+
+def _mark_seen_moved(tasks, seen) -> bool:
+    if not isinstance(seen, dict):
+        return False
+    hashes = seen.get("hashes")
+    if not isinstance(hashes, dict):
+        return False
+    changed = False
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("status") != "moved":
+            continue
+        row = hashes.get(str(task.get("infohash") or "").lower())
+        if isinstance(row, dict) and row.get("status") != "moved":
+            row["status"] = "moved"
+            changed = True
+    return changed
+
+
+def _number(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _task_rows(payload) -> list:

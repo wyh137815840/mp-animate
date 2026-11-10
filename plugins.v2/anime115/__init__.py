@@ -15,7 +15,7 @@ from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
-from .anime_config import PLAY_BASE, PLAY_BASE_LAN, offline_directory, usable_cookie
+from .anime_config import PLAY_BASE, PLAY_BASE_LAN, offline_directory, organize_schedule, scheduled_jobs, usable_cookie
 from .anime_playurl import (
     DEFAULT_LAN_CIDRS,
     DEFAULT_PUBLIC_HOSTS,
@@ -39,6 +39,7 @@ _FORM_NOTE = (
     "已经在库里的文件用 job=strm 重新生成 strm，不移动。strm 默认写内网播放地址，局域网不再走外网域名。"
     "外网播放地址留给公网 Emby 反代。两个地址都不能写 127.0.0.1。115 直链仍由 115网盘STRM助手签发。"
     "每日默认从 MoviePilot 订阅里只挑动漫去花园搜。电视剧和电影不搜。离线提交走已登录的存储，不使用 P115Client。"
+    "离线整理留空则每 30 分钟自动跑，不用手点。每日和摊平留空则不定时。"
     "摊平即使关了预览，也要另开「摊平允许落盘」才会移动。"
 )
 
@@ -49,7 +50,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.18"
+    plugin_version = "1.0.19"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -107,7 +108,7 @@ class Anime115(_PluginBase):
         self._flatten_apply = bool(config.get("flatten_apply"))
         self._storage = str(config.get("storage") or "u115").strip() or "u115"
         self._daily_cron = str(config.get("daily_cron") or "").strip()
-        self._organize_cron = str(config.get("organize_cron") or "").strip()
+        self._organize_cron = organize_schedule(config.get("organize_cron"))
         self._flatten_cron = str(config.get("flatten_cron") or "").strip()
         self._offline_root = offline_directory(config)
         self._cookie = usable_cookie(str(config.get("cookie") or ""))
@@ -134,12 +135,19 @@ class Anime115(_PluginBase):
         self._move_gap_seconds = _as_int(config.get("move_gap_seconds"), 2)
         self._flatten_max_moves = _as_int(config.get("flatten_max_moves"), 30)
         self._tmdb_api_key = str(config.get("tmdb_api_key") or "").strip()
+        blank_organize = not str(config.get("organize_cron") or "").strip()
+        migrate_organize = bool(config) and blank_organize and not getattr(self, "_organize_migrated", False)
+        if migrate_organize:
+            config["organize_cron"] = self._organize_cron
+            self._organize_migrated = True
         if self._onlyonce:
             self._onlyonce = False
             config["onlyonce"] = False
             self.update_config(config)
             if self._enabled:
                 threading.Thread(target=self.run_daily, name="anime115-once", daemon=True).start()
+        elif migrate_organize:
+            self.update_config(config)
 
     def get_state(self) -> bool:
         """插件是否启用。"""
@@ -188,29 +196,27 @@ class Anime115(_PluginBase):
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
-        """按填写的 cron 注册任务。空的或无效的不注册。"""
-        if not self.get_state():
-            return []
+        """按 cron 注册任务。整理留空用每 30 分钟。每日和摊平留空不注册。"""
         from apscheduler.triggers.cron import CronTrigger
 
+        funcs = {
+            "run_daily": self.run_daily,
+            "run_organize": self.run_organize,
+            "run_flatten": self.run_flatten,
+        }
         services = []
-        for service_id, name, cron, func in (
-            ("Anime115", "动漫每日补磁力", self._daily_cron, self.run_daily),
-            ("Anime115.Organize", "动漫离线整理", self._organize_cron, self.run_organize),
-            ("Anime115.Flatten", "动漫整包摊平", self._flatten_cron, self.run_flatten),
-        ):
-            if not cron:
-                continue
+        for spec in scheduled_jobs(self.get_state(), self._daily_cron, self._organize_cron, self._flatten_cron):
+            cron = spec["cron"]
             try:
                 trigger = CronTrigger.from_crontab(cron)
             except Exception as exc:
                 logger.warning(f"动漫 115 的定时表达式无效：{cron} ({exc})")
                 continue
             services.append({
-                "id": service_id,
-                "name": name,
+                "id": spec["id"],
+                "name": spec["name"],
                 "trigger": trigger,
-                "func": func,
+                "func": funcs[spec["func"]],
                 "kwargs": {},
             })
         return services
@@ -241,7 +247,7 @@ class Anime115(_PluginBase):
                             _switch(3, "require_sub", "不要生肉"),
                             _switch(3, "allow_batch", "允许合集"),
                             _field(4, "daily_cron", "每日补磁力", "15 10 * * *，留空则不定时"),
-                            _field(4, "organize_cron", "离线整理", "*/30 * * * *，留空则不定时"),
+                            _field(4, "organize_cron", "离线整理", "留空则每 30 分钟"),
                             _field(4, "flatten_cron", "整包摊平", "15 */2 * * *，留空则不定时"),
                             _field(6, "storage", "存储", "MoviePilot 里的 115 存储 ID，默认 u115"),
                             _area(
@@ -282,7 +288,7 @@ class Anime115(_PluginBase):
             "require_sub": True,
             "allow_batch": False,
             "daily_cron": "",
-            "organize_cron": "",
+            "organize_cron": "*/30 * * * *",
             "flatten_cron": "",
             "storage": "u115",
             "cookie": "",
@@ -431,7 +437,7 @@ class Anime115(_PluginBase):
         return self._guard("daily", self._daily)
 
     def run_organize(self) -> dict:
-        """把已完成的离线任务搬进库目录。"""
+        """把已落地的离线任务搬进库目录，并在成功后写 strm。"""
         return self._guard("organize", self._organize)
 
     def run_flatten(self) -> dict:
@@ -581,9 +587,15 @@ class Anime115(_PluginBase):
 
     def _organize(self) -> dict:
         tasks = list(self.get_data("tasks") or [])
-        result = run_organize(tasks, self._session(), self._config(), report=self._report)
+        seen = self.get_data("seen") or {}
+        if not isinstance(seen, dict):
+            seen = {}
+        result = run_organize(tasks, self._session(), self._config(), report=self._report, seen=seen)
+        changed = result.pop("seen_changed", False)
         if not result.get("dry_run") and result.get("ok"):
             self.save_data("tasks", tasks)
+            if changed:
+                self.save_data("seen", seen)
         return result
 
     def _flatten(self) -> dict:

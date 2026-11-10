@@ -32,7 +32,14 @@ from anime115.anime_dmhy import (  # noqa: E402
 from anime115.anime_flatten import Node, apply_proposals, propose  # noqa: E402
 from anime115.anime_jobs import JobConfig, resolve_show_folder, run_daily, run_flatten, run_organize, run_strm  # noqa: E402
 from anime115.anime_strm import build_play_url, episode_strm_name  # noqa: E402
-from anime115.anime_config import PLAY_BASE, PLAY_BASE_LAN, offline_directory, usable_cookie  # noqa: E402
+from anime115.anime_config import (  # noqa: E402
+    PLAY_BASE,
+    PLAY_BASE_LAN,
+    offline_directory,
+    organize_schedule,
+    scheduled_jobs,
+    usable_cookie,
+)
 from anime115.anime_jobs import _finished_hashes  # noqa: E402
 from anime115.anime_names import parse_episode, parse_watchlist, strip_mount_prefix, title_matches  # noqa: E402
 from anime115.anime_pan import CookieSession, Pan115  # noqa: E402
@@ -806,6 +813,195 @@ class JobTest(unittest.TestCase):
             self.assertNotIn("mp.yuanhot.top", text)
             self.assertIn("pickcode=lolihousecode0001", text)
 
+    def test_organize_past_the_fifth_offline_page_and_clears_the_inbox(self):
+        day10 = "/离线下载/动漫/20261110"
+        day09 = "/离线下载/动漫/20261109"
+        day08 = "/离线下载/动漫/20261108"
+        spy = "[LoliHouse] 间谍教室 - 05 [1080p].mkv"
+        dungeon = "[LoliHouse] 迷宫饭 - 03 [1080p].mkv"
+        frieren = "[LoliHouse] 葬送的芙莉莲 - 08 [1080p].mkv"
+        failed = "[LoliHouse] 为了养老金去异世界存八万金 - 01 [1080p].mkv"
+        pension = "[LoliHouse] 为了养老金去异世界存八万金 - 02 [1080p].mkv"
+        isekai = "[LoliHouse] 异世界召唤是第二次了 - 02 [1080p].mkv"
+        session = _PagedOffline(_full_offline_pages(spy))
+        session.dirs[day10] = [
+            Node(f"{day10}/{spy}", spy, False, 900 * 1024 * 1024, raw={"fid": "spy-file", "pc": "spyclasscode00001"}),
+            Node(f"{day10}/{frieren}", frieren, False, 900 * 1024 * 1024, raw={"pc": "frierencode000001"}),
+            Node(f"{day10}/{failed}", failed, False, 900 * 1024 * 1024, raw={"pc": "failedcode0000001"}),
+            Node(f"{day10}/{pension}", pension, False, 900 * 1024 * 1024, raw={"pc": "pensioncode000001"}),
+        ]
+        session.dirs[day09] = [
+            Node(f"{day09}/{dungeon}", dungeon, False, 900 * 1024 * 1024, raw={"pc": "dungeonmesh000001"}),
+        ]
+        session.dirs[day08] = [
+            Node(f"{day08}/{isekai}", isekai, False, 900 * 1024 * 1024, raw={"pc": "isekaicode0000001"}),
+        ]
+        tasks = [
+            {"infohash": HASH, "show": "间谍教室", "season": 1, "episode": 5, "title": spy, "folder": day10, "status": "submitted"},
+            {"infohash": "b" * 40, "show": "迷宫饭", "season": 1, "episode": 3, "title": dungeon, "folder": day09, "status": "submitted"},
+            {"infohash": "d" * 40, "show": "葬送的芙莉莲", "season": 1, "episode": 8, "title": frieren, "folder": day10, "status": "submitted"},
+            {"infohash": "e" * 40, "show": "为了养老金去异世界存八万金", "season": 1, "episode": 2, "title": pension, "folder": day10, "status": "moved"},
+            {"infohash": "c" * 40, "show": "为了养老金去异世界存八万金", "season": 1, "episode": 1, "title": failed, "folder": day10, "status": "submitted"},
+        ]
+        seen = {"hashes": {
+            HASH: {"show": "间谍教室", "season": 1, "episode": 5, "status": "submitted", "folder": day10, "title": spy},
+            "f" * 40: {"show": "异世界召唤是第二次了", "season": 1, "episode": 2, "status": "submitted", "folder": day08, "title": isekai},
+        }}
+        with tempfile.TemporaryDirectory() as tmp:
+            config = JobConfig(
+                dry_run=False,
+                library_root="/动漫",
+                offline_root="/离线下载/动漫",
+                strm_root=tmp,
+                play_base=PLAY_BASE,
+                play_base_lan=PLAY_BASE_LAN,
+                strm_for="lan",
+            )
+            result = run_organize(tasks, session, config, seen=seen)
+            self.assertEqual(session.asked, [1, 2, 3, 4, 5, 6])
+            self.assertEqual([item["name"] for item in result["moves"]], [spy, dungeon, isekai])
+            self.assertTrue(all(item["action"] == "move" for item in result["moves"]))
+            self.assertEqual(result["moves"][0]["dest_dir"], "/动漫/间谍教室/Season 01")
+            self.assertEqual([item[2] for item in session.moves], [spy, dungeon, isekai])
+            self.assertEqual(tasks[0]["status"], "moved")
+            self.assertEqual(tasks[1]["status"], "moved")
+            self.assertEqual(tasks[2]["status"], "submitted")
+            self.assertEqual(tasks[3]["status"], "moved")
+            self.assertEqual(tasks[4]["status"], "submitted")
+            self.assertEqual(tasks[5]["infohash"], "f" * 40)
+            self.assertEqual(tasks[5]["status"], "moved")
+            self.assertEqual(seen["hashes"][HASH]["status"], "moved")
+            self.assertEqual(seen["hashes"]["f" * 40]["status"], "moved")
+            written = list(Path(tmp).rglob("*.strm"))
+            self.assertEqual(len(written), 3)
+            for path in written:
+                text = path.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("http://192.168.1.9:3000/"))
+                self.assertNotIn("mp.yuanhot.top", text)
+            self.assertFalse(list(Path(tmp).rglob("*.nfo")))
+            self.assertFalse(list(Path(tmp).rglob("*.jpg")))
+            session.moves.clear()
+            again = run_organize(tasks, session, config, seen=seen)
+            self.assertEqual(again["moves"], [])
+            self.assertEqual(session.moves, [])
+            self.assertEqual(len(list(Path(tmp).rglob("*.strm"))), 3)
+
+    def test_empty_offline_list_still_moves_the_dated_inbox(self):
+        day = "/离线下载/动漫/20261109"
+        video = "[LoliHouse] 迷宫饭 - 03 [1080p].mkv"
+        session = _CountingOffline()
+        session.dirs[day] = [
+            Node(f"{day}/{video}", video, False, 900 * 1024 * 1024, raw={"pc": "dungeonmesh000001"}),
+        ]
+        tasks = [{
+            "infohash": HASH,
+            "show": "迷宫饭",
+            "season": 1,
+            "episode": 3,
+            "title": video,
+            "folder": day,
+            "status": "submitted",
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_organize(tasks, session, JobConfig(
+                dry_run=False,
+                library_root="/动漫",
+                strm_root=tmp,
+                play_base=PLAY_BASE,
+                play_base_lan=PLAY_BASE_LAN,
+                strm_for="lan",
+            ))
+            self.assertEqual(session.asked, [1])
+            self.assertEqual(result["moves"][0]["action"], "move")
+            self.assertEqual(result["moves"][0]["name"], video)
+            self.assertEqual(tasks[0]["status"], "moved")
+            written = list(Path(tmp).rglob("*.strm"))
+            self.assertEqual(len(written), 1)
+            self.assertTrue(written[0].read_text(encoding="utf-8").startswith("http://192.168.1.9:3000/"))
+            self.assertFalse(list(Path(tmp).rglob("*.nfo")))
+
+    def test_downloading_task_stays_in_the_inbox(self):
+        day = "/离线下载/动漫/20261110"
+        video = "[LoliHouse] 葬送的芙莉莲 - 08 [1080p].mkv"
+        session = _Fake()
+        session.offline = [{"info_hash": HASH, "status": 1, "percentDone": 40, "name": video}]
+        session.dirs[day] = [Node(f"{day}/{video}", video, False, 900 * 1024 * 1024, raw={"pc": "frierencode000001"})]
+        tasks = [{
+            "infohash": HASH,
+            "show": "葬送的芙莉莲",
+            "season": 1,
+            "episode": 8,
+            "title": video,
+            "folder": day,
+            "status": "submitted",
+        }]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertEqual(result["moves"], [])
+        self.assertEqual(session.moves, [])
+        self.assertEqual(tasks[0]["status"], "submitted")
+
+    def test_page_sized_count_still_reads_the_next_offline_page(self):
+        day = "/离线下载/动漫/20261110"
+        video = "[LoliHouse] 间谍教室 - 05 [1080p].mkv"
+        session = _CountLooksLikePageSize()
+        session.dirs[day] = [Node(f"{day}/{video}", video, False, 900 * 1024 * 1024)]
+        tasks = [{
+            "infohash": HASH,
+            "show": "间谍教室",
+            "season": 1,
+            "episode": 5,
+            "title": video,
+            "folder": day,
+            "status": "submitted",
+        }]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertIn(2, session.asked)
+        self.assertEqual(result["moves"], [])
+        self.assertEqual(session.moves, [])
+        self.assertEqual(tasks[0]["status"], "submitted")
+
+    def test_repeated_full_offline_page_does_not_move_unseen_tasks(self):
+        day = "/离线下载/动漫/20261110"
+        video = "[LoliHouse] 间谍教室 - 05 [1080p].mkv"
+        session = _RepeatingOffline()
+        session.dirs[day] = [Node(f"{day}/{video}", video, False, 900 * 1024 * 1024)]
+        tasks = [{
+            "infohash": HASH,
+            "show": "间谍教室",
+            "season": 1,
+            "episode": 5,
+            "title": video,
+            "folder": day,
+            "status": "submitted",
+        }]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertEqual(session.asked, [1, 2])
+        self.assertEqual(result["moves"], [])
+        self.assertEqual(session.moves, [])
+        self.assertEqual(tasks[0]["status"], "submitted")
+
+    def test_organize_collision_does_not_move_again(self):
+        video = "E03.mkv"
+        dest = "/动漫/佐藤同学/Season 01"
+        session = _Fake()
+        session.offline = [{"info_hash": HASH, "status": 2}]
+        session.dirs["/box"] = [Node("/box/" + video, video, False, 900 * 1024 * 1024)]
+        session.dirs[dest] = [Node(dest + "/" + video, video, False)]
+        tasks = [{
+            "infohash": HASH,
+            "show": "佐藤同学",
+            "season": 1,
+            "episode": 3,
+            "title": "佐藤同学 - 03",
+            "folder": "/box",
+            "status": "submitted",
+        }]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertEqual(result["moves"][0]["action"], "leave")
+        self.assertEqual(result["moves"][0]["reason"], "collision")
+        self.assertEqual(session.moves, [])
+        self.assertEqual(tasks[0]["status"], "submitted")
+
     def test_flatten_does_nothing_when_all_collision(self):
         session = _Fake()
         session.dirs["/inbox"] = [Node("/inbox/show", "show", True)]
@@ -928,6 +1124,22 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(offline_directory({}), "/离线下载/动漫")
         self.assertIn("pickcode={pickcode}", PLAY_BASE)
         self.assertNotIn("127.0.0.1", PLAY_BASE)
+        self.assertEqual(organize_schedule(""), "*/30 * * * *")
+        self.assertEqual(organize_schedule(None), "*/30 * * * *")
+        self.assertEqual(organize_schedule("  "), "*/30 * * * *")
+        self.assertEqual(organize_schedule("15 1 * * *"), "15 1 * * *")
+        jobs = scheduled_jobs(True, "15 */4 * * *", "", "")
+        self.assertEqual(
+            [(item["id"], item["name"], item["cron"]) for item in jobs],
+            [
+                ("Anime115", "动漫每日补磁力", "15 */4 * * *"),
+                ("Anime115.Organize", "动漫离线整理", "*/30 * * * *"),
+            ],
+        )
+        self.assertEqual(scheduled_jobs(False, "15 */4 * * *", "", "15 */2 * * *"), [])
+        custom = scheduled_jobs(True, "", "15 2 * * *", "15 */2 * * *")
+        self.assertEqual([item["name"] for item in custom], ["动漫离线整理", "动漫整包摊平"])
+        self.assertEqual(custom[0]["cron"], "15 2 * * *")
 
 
 class CookiePanTest(unittest.TestCase):
@@ -948,6 +1160,23 @@ class CookiePanTest(unittest.TestCase):
         self.assertTrue(session.delete_dir("/离线下载/动漫/empty"))
         self.assertEqual(pan.deleted, [("31", "11")])
         self.assertEqual(session.quota(), {"data": {}})
+
+    def test_task_list_keeps_page_count(self):
+        class Client:
+            def clouddownload_task_list(self, payload):
+                return {
+                    "page": payload["page"],
+                    "page_count": 6,
+                    "count": 120,
+                    "tasks": [{"info_hash": "ab" * 20, "status": 2}],
+                }
+
+        pan = Pan115("UID=9_1", http=object(), gap=0, client_factory=lambda _cookie: Client())
+        found = pan.list_tasks(6)
+        self.assertEqual(found["data"]["page"], 6)
+        self.assertEqual(found["data"]["page_count"], 6)
+        self.assertEqual(found["data"]["count"], 120)
+        self.assertEqual(found["data"]["tasks"][0]["status"], 2)
 
     def test_directory_walk_uses_aps_and_app_folder_api(self):
         http = _ScriptedHttp([
@@ -1042,7 +1271,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.18")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.19")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):
@@ -1056,6 +1285,47 @@ class ImportTest(unittest.TestCase):
         self.assertNotIn("mp.yuanhot.top", defaults["play_base_lan"])
         self.assertIn("mp.yuanhot.top", defaults["play_base"])
         self.assertEqual(defaults["subscribe_source"], "mp")
+        self.assertEqual(defaults["organize_cron"], "*/30 * * * *")
+        self.assertEqual(defaults["daily_cron"], "")
+        self.assertEqual(defaults["flatten_cron"], "")
+        saved = []
+        host = plugin.Anime115()
+
+        def remember(config):
+            saved.append({
+                "daily_cron": config.get("daily_cron"),
+                "organize_cron": config.get("organize_cron"),
+                "flatten_cron": config.get("flatten_cron"),
+            })
+
+        host.update_config = remember
+        host.init_plugin({
+            "enabled": True,
+            "daily_cron": "15 */4 * * *",
+            "organize_cron": "",
+            "flatten_cron": "",
+        })
+        self.assertEqual(host._daily_cron, "15 */4 * * *")
+        self.assertEqual(host._flatten_cron, "")
+        self.assertEqual(host._organize_cron, "*/30 * * * *")
+        self.assertEqual(saved, [{
+            "daily_cron": "15 */4 * * *",
+            "organize_cron": "*/30 * * * *",
+            "flatten_cron": "",
+        }])
+        host.init_plugin({
+            "enabled": True,
+            "daily_cron": "15 */4 * * *",
+            "organize_cron": "15 2 * * *",
+            "flatten_cron": "",
+        })
+        self.assertEqual(host._organize_cron, "15 2 * * *")
+        self.assertEqual(len(saved), 1)
+        fresh = plugin.Anime115()
+        fresh.update_config = remember
+        fresh.init_plugin(None)
+        self.assertEqual(fresh._organize_cron, "*/30 * * * *")
+        self.assertEqual(len(saved), 1)
         daily = (_ROOT / "__init__.py").read_text().split("def _daily", 1)[1].split("def _prepare_shows", 1)[0]
         self.assertIn("_mp_session", daily)
         self.assertNotIn("P115Client", daily)
@@ -1141,6 +1411,21 @@ class _FakePan:
         return {"data": {"tasks": self.client.clouddownload_task_list({})["tasks"]}}
 
 
+def _filler(page: int, index: int) -> str:
+    return f"{page:02d}{index:02d}{'cd' * 18}"
+
+
+def _full_offline_pages(spy_name: str) -> dict:
+    """6 页、每页 20 条。间谍教室在第 6 页，芙莉莲还在下，养老金那条失败。"""
+    pages = {}
+    for page in range(1, 7):
+        pages[page] = [{"info_hash": _filler(page, index), "status": 2} for index in range(20)]
+    pages[1][0] = {"info_hash": "d" * 40, "status": 1, "percentDone": 40, "name": "葬送的芙莉莲"}
+    pages[1][1] = {"info_hash": "c" * 40, "status": -1, "name": "为了养老金去异世界存八万金"}
+    pages[6][-1] = {"info_hash": HASH, "status": 2, "name": spy_name, "file_id": "spy-file"}
+    return pages
+
+
 class _Fake:
     def __init__(self):
         self.added = []
@@ -1178,6 +1463,58 @@ class _Fake:
     def delete_dir(self, path):
         self.deleted.append(path)
         return True
+
+
+class _PagedOffline(_Fake):
+    def __init__(self, pages):
+        super().__init__()
+        self.pages = pages
+        self.asked = []
+
+    def list_offline(self, page):
+        self.asked.append(page)
+        rows = self.pages.get(page, [])
+        return {"data": {"tasks": rows, "page": page, "page_count": 6, "count": 120}}
+
+
+class _CountingOffline(_Fake):
+    def __init__(self):
+        super().__init__()
+        self.asked = []
+
+    def list_offline(self, page):
+        self.asked.append(page)
+        return super().list_offline(page)
+
+
+class _CountLooksLikePageSize(_Fake):
+    """count 等于这一页的 20 条时，后面一页仍要读。那里还在下载的不能当已落地。"""
+
+    def __init__(self):
+        super().__init__()
+        self.asked = []
+
+    def list_offline(self, page):
+        self.asked.append(page)
+        if page == 1:
+            rows = [{"info_hash": f"{index:02d}{'ab' * 19}", "status": 2} for index in range(20)]
+            return {"data": {"tasks": rows, "count": 20}}
+        if page == 2:
+            return {"data": {"tasks": [{"info_hash": HASH, "status": 1, "percentDone": 10}], "count": 20}}
+        return {"data": {"tasks": []}}
+
+
+class _RepeatingOffline(_Fake):
+    def __init__(self):
+        super().__init__()
+        self.asked = []
+
+    def list_offline(self, page):
+        self.asked.append(page)
+        return {"data": {"tasks": [
+            {"info_hash": f"{index:02d}{'ab' * 19}", "status": 2}
+            for index in range(20)
+        ]}}
 
 
 if __name__ == "__main__":
