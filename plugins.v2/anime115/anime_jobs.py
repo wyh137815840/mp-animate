@@ -180,7 +180,7 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
                 index=index,
                 total=len(work),
                 current=task.get("title") or task.get("show") or "",
-                result="ok" if last.get("action") == "move" else (last.get("reason") or "跳过"),
+                result="ok" if last.get("action") == "move" else (last.get("error") or last.get("reason") or "跳过"),
                 organized=organized,
                 skipped=skipped,
                 failed=failed,
@@ -219,11 +219,16 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
     dest_dir = decision["dest_dir"]
     try:
         made = session.ensure_dir(dest_dir)
-    except Exception:
+    except Exception as exc:
+        _log_mkdir(dest_dir, exc)
         made = None
+        failure = exc
+    else:
+        failure = None
     if made is None or not str(getattr(made, "fileid", "") or ""):
         decision["action"] = "leave"
         decision["reason"] = "建不了目标目录"
+        decision["error"] = f"{dest_dir}：{failure}" if failure is not None else f"{dest_dir}：没有目录 id"
         return
     try:
         existing = {item.name for item in session.list_dir(dest_dir)}
@@ -348,6 +353,17 @@ def run_flatten(session, config: JobConfig, report=None) -> dict:
 def _tell(report, **fields) -> None:
     if report:
         report(fields)
+
+
+def _log_mkdir(path: str, exc: Exception) -> None:
+    """建目录失败要把路径和 115 返回留下来。界面上仍记「建不了目标目录」。"""
+    text = f"动漫 115 建不了目标目录 {path}：{exc}"
+    try:
+        from app.log import logger
+        logger.warning(text)
+    except Exception:
+        import logging
+        logging.getLogger("anime115").warning(text)
 
 
 def _tell_daily(report, index, total, title, result, queued, submitted, skipped, failed) -> None:
