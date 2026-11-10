@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,12 +13,172 @@ from .anime_dmhy import Pick, SearchOptions, select_shows
 from .anime_flatten import Node, apply_proposals, propose
 from .anime_names import Show, _fold_name, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
 from .anime_playurl import PlayUrlError, play_url_for_strm
-from .anime_strm import pickcode_of, strm_relative, write_strm
+from .anime_strm import commit_strm, pickcode_of, strm_relative
 
 
 SUB_EXTS = {".ass", ".srt", ".ssa", ".sup", ".sub", ".idx", ".vtt"}
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".ts", ".m2ts"}
 _SHOW_YEAR = re.compile(r"^(.+?) [(（](\d{4})[)）]$")
+# 开放平台和 p115client 都可能一直不返回。到点就结束这一轮，避免整理把后面的周期全部挡住。
+_OFFLINE_CALL_TIMEOUT = 45
+
+
+class JobStopped(Exception):
+    """停止或重载把这一轮取消了。"""
+
+
+def _event_set(cancel) -> bool:
+    return cancel is not None and cancel.is_set()
+
+
+def _cancelled(session) -> bool:
+    return _event_set(getattr(session, "cancel", None))
+
+
+def _call(session, func):
+    """在限时内等 115 返回。停止或重载时不再占着这一轮。"""
+    return _wait_call(getattr(session, "cancel", None), func, _OFFLINE_CALL_TIMEOUT)
+
+
+def _wait_call(cancel, func, timeout: float):
+    if _event_set(cancel):
+        raise JobStopped("已停止")
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = func()
+        except Exception as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, name="anime115-115", daemon=True)
+    worker.start()
+    deadline = time.monotonic() + timeout
+    while worker.is_alive():
+        if _event_set(cancel):
+            raise JobStopped("已停止")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"115 请求超过 {int(timeout)} 秒")
+        worker.join(min(0.5, remaining))
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
+
+
+def _job_log(message: str, level: str = "info") -> None:
+    try:
+        from app.log import logger
+        getattr(logger, level, logger.info)(message)
+    except Exception:
+        import logging
+        getattr(logging.getLogger("anime115"), level, logging.getLogger("anime115").info)(message)
+
+
+def _daily_stopped(config: JobConfig, inbox: str, chosen, notes, submitted) -> dict:
+    return {
+        "ok": False,
+        "error": "已停止",
+        "dry_run": config.dry_run,
+        "inbox": inbox,
+        "picks": [_pick_row(item) for item in chosen],
+        "notes": notes,
+        "submitted": submitted,
+        "persist": bool(submitted) and not config.dry_run,
+    }
+
+
+def _organize_status(config: JobConfig, moves, *, error: str = "", stopped: bool = False, dirty: bool = False, tasks=None, seen=None) -> dict:
+    """整理的结束状态。停掉或超时时仍可把已经搬完的任务留下来。"""
+    if stopped and not error:
+        error = "已停止"
+    seen_changed = False
+    if not config.dry_run and tasks is not None and (not error or dirty):
+        seen_changed = _mark_seen_moved(tasks, seen)
+    public = [_public_move(item) for item in moves]
+    payload = {
+        "ok": not error,
+        "dry_run": config.dry_run,
+        "moves": public,
+        "seen_changed": seen_changed,
+        "persist": (not config.dry_run) and bool(error) and dirty,
+    }
+    if error:
+        payload["error"] = error
+    summary = _strm_summary(public)
+    if summary:
+        payload["strm_error"] = summary
+    return payload
+
+
+def _strm_summary(moves) -> str:
+    errors = [item.get("strm_error") for item in moves if isinstance(item, dict) and item.get("strm_error")]
+    if not errors:
+        return ""
+    return f"strm 写入失败 {len(errors)} 个：{errors[0]}"
+
+
+def _retry_pending_strm(tasks, session, config: JobConfig) -> tuple[list, bool]:
+    """上一轮已经搬走、但 strm 没写成的，这一轮先补。不再移动 115 上的文件。"""
+    if config.dry_run or not (config.strm_root or "").strip() or not isinstance(tasks, list):
+        return [], False
+    notes = []
+    changed = False
+    cancel = getattr(session, "cancel", None)
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("strm_status") != "failed":
+            continue
+        relative = str(task.get("strm_relative") or "")
+        url = str(task.get("strm_url") or "")
+        if not relative or not url:
+            continue
+        if _event_set(cancel):
+            break
+        try:
+            path = commit_strm(config.strm_root, relative, url, cancel=cancel)
+        except OSError as exc:
+            notes.append({
+                "action": "strm",
+                "reason": "失败",
+                "strm_error": str(exc),
+                "show": task.get("show") or "",
+                "name": task.get("title") or "",
+            })
+            continue
+        task["strm_status"] = "written"
+        task.pop("strm_relative", None)
+        task.pop("strm_url", None)
+        changed = True
+        notes.append({
+            "action": "strm",
+            "reason": "ok",
+            "strm": path,
+            "show": task.get("show") or "",
+            "name": task.get("title") or "",
+        })
+    return notes, changed
+
+
+def _remember_strm(task: dict, decision: dict) -> None:
+    if decision.get("strm") and not decision.get("strm_error"):
+        task["strm_status"] = "written"
+        task.pop("strm_relative", None)
+        task.pop("strm_url", None)
+        return
+    relative = decision.get("strm_relative") or ""
+    url = decision.get("strm_url") or ""
+    if decision.get("strm_error") and relative and url:
+        task["strm_status"] = "failed"
+        task["strm_relative"] = relative
+        task["strm_url"] = url
+
+
+def _index_done(found: dict, complete: bool):
+    if complete:
+        _job_log(f"动漫 115 整理离线列表翻完，{len(found)} 条")
+    else:
+        _job_log(f"动漫 115 整理离线列表没有翻完，已看到 {len(found)} 条，没见到的任务先留着", "warning")
+    return found, complete
 
 
 @dataclass
@@ -57,6 +219,8 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
             continue
         chosen.append(pick)
     chosen = chosen[: config.max_submit_per_run]
+    if _cancelled(session):
+        return _daily_stopped(config, inbox, chosen, notes, [])
     submitted = []
     step, skipped, failed = _walk_notes(report, "daily", config.dry_run, notes, len(chosen))
     if config.dry_run:
@@ -83,21 +247,50 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
             "notes": notes,
             "submitted": [],
         }
-    if not session.check_login():
+    try:
+        logged_in = _call(session, session.check_login)
+    except JobStopped:
+        return _daily_stopped(config, inbox, chosen, notes, [])
+    except TimeoutError as exc:
+        return {"ok": False, "error": f"115 登录检查超时：{exc}", "picks": [], "dry_run": False, "inbox": inbox}
+    if not logged_in:
         return {"ok": False, "error": "115 未登录", "picks": [], "dry_run": False}
-    quota = _quota_left(session.quota())
+    try:
+        quota = _quota_left(_call(session, session.quota))
+    except JobStopped:
+        return _daily_stopped(config, inbox, chosen, notes, [])
+    except TimeoutError as exc:
+        return {"ok": False, "error": f"离线配额查询超时：{exc}", "picks": [], "dry_run": False, "inbox": inbox}
     if quota is not None and quota <= 0:
         return {"ok": False, "error": "离线配额用尽", "picks": [_pick_row(item) for item in chosen], "dry_run": False}
-    folder = session.ensure_dir(inbox)
+    try:
+        folder = _call(session, lambda: session.ensure_dir(inbox))
+    except JobStopped:
+        return _daily_stopped(config, inbox, chosen, notes, [])
+    except TimeoutError as exc:
+        return {"ok": False, "error": f"建当天目录超时：{exc}", "inbox": inbox, "dry_run": False}
     fileid = getattr(folder, "fileid", "") if folder is not None else ""
     if not fileid:
         return {"ok": False, "error": "建不了当天目录", "inbox": inbox, "dry_run": False}
     for index, pick in enumerate(chosen):
+        if _cancelled(session):
+            return _daily_stopped(config, inbox, chosen, notes, submitted)
         if quota is not None and quota <= 0:
             break
         if index:
             session.sleep(config.offline_gap_seconds)
-        result = session.add_offline(pick.torrent.magnet, fileid)
+        if _cancelled(session):
+            return _daily_stopped(config, inbox, chosen, notes, submitted)
+        magnet = pick.torrent.magnet
+        try:
+            result = _call(session, lambda magnet=magnet, folder=fileid: session.add_offline(magnet, folder))
+        except JobStopped:
+            return _daily_stopped(config, inbox, chosen, notes, submitted)
+        except TimeoutError as exc:
+            failed += 1
+            notes.append({"show": pick.show, "title": pick.torrent.title, "reason": f"离线提交超时：{exc}"})
+            _tell_daily(report, step + index + 1, step + len(chosen), pick.torrent.title, "失败", len(chosen) - index - 1, len(submitted), skipped, failed)
+            continue
         if not _accepted(result):
             failed += 1
             notes.append({"show": pick.show, "title": pick.torrent.title, "reason": "离线提交失败"})
@@ -130,12 +323,29 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
     仍按提交时记下的日期收件箱整理。列表里还在下载或失败的不动。
     """
     library = strip_mount_prefix(config.library_root, config.mount_prefix) if config.library_root else ""
+    if _cancelled(session):
+        return _organize_status(config, [], stopped=True)
     if not library or library == "/":
         return {"ok": False, "error": "没有填写库根", "moves": [], "dry_run": config.dry_run}
-    if not session.check_login():
-        return {"ok": False, "error": "115 未登录", "moves": [], "dry_run": config.dry_run}
+    pending, dirty = _retry_pending_strm(tasks, session, config)
+    if _cancelled(session):
+        return _organize_status(config, pending, stopped=True, dirty=dirty, tasks=tasks, seen=seen)
+    try:
+        logged_in = _call(session, session.check_login)
+    except JobStopped:
+        return _organize_status(config, pending, stopped=True, dirty=dirty, tasks=tasks, seen=seen)
+    except TimeoutError as exc:
+        return _organize_status(config, pending, error=f"115 登录检查超时：{exc}", dirty=dirty, tasks=tasks, seen=seen)
+    if not logged_in:
+        return _organize_status(config, pending, error="115 未登录", dirty=dirty, tasks=tasks, seen=seen)
     _include_seen(tasks, seen)
-    listed, complete = _offline_index(session)
+    try:
+        listed, complete = _offline_index(session)
+    except JobStopped:
+        return _organize_status(config, pending, stopped=True, dirty=dirty, tasks=tasks, seen=seen)
+    except TimeoutError as exc:
+        _job_log(f"动漫 115 整理离线列表超时：{exc}", "warning")
+        return _organize_status(config, pending, error=f"离线列表超时：{exc}", dirty=dirty, tasks=tasks, seen=seen)
     work = []
     for task in tasks:
         if not isinstance(task, dict) or task.get("status") == "moved":
@@ -155,9 +365,13 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
     organized = skipped = failed = 0
     _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=0, total=len(work), organized=0, skipped=0, failed=0, current="", result="")
     for index, pair in enumerate(work, start=1):
+        if _cancelled(session):
+            return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         task, offline = pair
         try:
             _organize_one(task, session, library, config, moves, offline)
+        except JobStopped:
+            return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         except Exception:
             moves.append({"action": "leave", "reason": "整理失败", "task": task.get("infohash"), "nodes": []})
             _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=index, total=len(work), current=task.get("title") or task.get("show") or "", result="整理失败", organized=organized, skipped=skipped, failed=failed + 1)
@@ -185,15 +399,7 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
                 skipped=skipped,
                 failed=failed,
             )
-    seen_changed = False
-    if not config.dry_run:
-        seen_changed = _mark_seen_moved(tasks, seen)
-    return {
-        "ok": True,
-        "dry_run": config.dry_run,
-        "moves": [_public_move(item) for item in moves],
-        "seen_changed": seen_changed,
-    }
+    return _organize_status(config, [*pending, *moves], tasks=tasks, seen=seen, dirty=True)
 
 
 def _organize_one(task, session, library, config, moves, offline=None) -> None:
@@ -245,18 +451,27 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
             return
         session.sleep(config.move_gap_seconds)
     task["status"] = "moved"
-    _apply_strm(decision, config, write=True)
+    _apply_strm(decision, config, write=True, cancel=getattr(session, "cancel", None))
+    _remember_strm(task, decision)
 
 
 def run_strm(session, config: JobConfig, limit: str = "", report=None) -> dict:
     """给库里已经整理好的视频补 strm。不移动 115 上的文件，也不写 nfo。"""
     library = strip_mount_prefix(config.library_root, config.mount_prefix) if config.library_root else ""
     root = (config.strm_root or "").strip()
+    if _cancelled(session):
+        return {"ok": False, "error": "已停止", "items": [], "dry_run": config.dry_run}
     if not root:
         return {"ok": False, "error": "没有填写 strm 目录", "items": [], "dry_run": config.dry_run}
     if not library or library == "/":
         return {"ok": False, "error": "没有填写库根", "items": [], "dry_run": config.dry_run}
-    if not session.check_login():
+    try:
+        logged_in = _call(session, session.check_login)
+    except JobStopped:
+        return {"ok": False, "error": "已停止", "items": [], "dry_run": config.dry_run}
+    except TimeoutError as exc:
+        return {"ok": False, "error": f"115 登录检查超时：{exc}", "items": [], "dry_run": config.dry_run}
+    if not logged_in:
         return {"ok": False, "error": "115 未登录", "items": [], "dry_run": config.dry_run}
     chosen = strip_mount_prefix(limit, config.mount_prefix) if (limit or "").strip() else ""
     if chosen and chosen != library and not chosen.startswith(library + "/"):
@@ -266,7 +481,17 @@ def run_strm(session, config: JobConfig, limit: str = "", report=None) -> dict:
     written = skipped = failed = 0
     _tell(report, job="strm", phase="running", dry_run=config.dry_run, index=0, total=len(rows), written=0, skipped=0, failed=0, current="", result="")
     for index, row in enumerate(rows, start=1):
-        item = _strm_one(row, config)
+        if _cancelled(session):
+            return {
+                "ok": False,
+                "error": "已停止",
+                "dry_run": config.dry_run,
+                "written": written,
+                "skipped": skipped,
+                "failed": failed,
+                "items": items,
+            }
+        item = _strm_one(row, config, cancel=getattr(session, "cancel", None))
         items.append(item)
         if item["action"] == "write" and not config.dry_run and not item.get("error"):
             written += 1
@@ -293,7 +518,7 @@ def run_strm(session, config: JobConfig, limit: str = "", report=None) -> dict:
             skipped=skipped,
             failed=failed,
         )
-    return {
+    payload = {
         "ok": True,
         "dry_run": config.dry_run,
         "written": written,
@@ -301,19 +526,38 @@ def run_strm(session, config: JobConfig, limit: str = "", report=None) -> dict:
         "failed": failed,
         "items": items,
     }
+    if failed:
+        first = next((item.get("error") for item in items if item.get("error")), "")
+        payload["strm_error"] = f"strm 写入失败 {failed} 个：{first}"
+    return payload
 
 
 def run_flatten(session, config: JobConfig, report=None) -> dict:
     """先分类。安全移动为 0，或预览、或没开摊平落盘时，不移动。"""
     roots = [strip_mount_prefix(item, config.mount_prefix) for item in config.flatten_roots if str(item).strip()]
     roots = [norm(item) for item in roots]
+    if _cancelled(session):
+        return {"ok": False, "error": "已停止", "counts": {}, "dry_run": config.dry_run, "moved": 0}
     if not roots or any(item == "/" for item in roots):
         return {"ok": False, "error": "摊平目录为空或是根目录", "counts": {}, "dry_run": config.dry_run}
-    if not session.check_login():
+    try:
+        logged_in = _call(session, session.check_login)
+    except JobStopped:
+        return {"ok": False, "error": "已停止", "counts": {}, "dry_run": config.dry_run, "moved": 0}
+    except TimeoutError as exc:
+        return {"ok": False, "error": f"115 登录检查超时：{exc}", "counts": {}, "dry_run": config.dry_run, "moved": 0}
+    if not logged_in:
         return {"ok": False, "error": "115 未登录", "counts": {}, "dry_run": config.dry_run}
     nodes = []
-    for root in roots:
-        nodes.extend(_flatten_list(session, root, depth=6))
+    try:
+        for root in roots:
+            if _cancelled(session):
+                raise JobStopped("已停止")
+            nodes.extend(_flatten_list(session, root, depth=6))
+    except JobStopped:
+        return {"ok": False, "error": "已停止", "counts": {}, "dry_run": config.dry_run, "moved": 0}
+    if _cancelled(session):
+        return {"ok": False, "error": "已停止", "counts": {}, "dry_run": config.dry_run, "moved": 0}
     proposals = propose(nodes, roots, config.min_episode_mb * 1024 * 1024)
     apply = (not config.dry_run) and config.flatten_apply
     moved = apply_proposals(proposals, session, apply, config.flatten_max_moves)
@@ -522,16 +766,24 @@ def _offline_index(session) -> tuple[dict[str, dict], bool]:
     没看完时，没见到的任务先留着，避免把还在下载的文件搬走。
     """
     found: dict[str, dict] = {}
+    _job_log("动漫 115 整理开始翻离线列表")
     for page in range(1, _OFFLINE_PAGE_LIMIT + 1):
+        if _cancelled(session):
+            raise JobStopped("已停止")
+        _job_log(f"动漫 115 整理离线列表第 {page} 页")
         try:
-            payload = session.list_offline(page)
+            payload = _call(session, lambda page=page: session.list_offline(page))
+        except JobStopped:
+            raise
+        except TimeoutError:
+            raise
         except Exception:
             if page == 1:
                 raise
-            return found, False
+            return _index_done(found, False)
         rows = [item for item in _task_rows(payload) if isinstance(item, dict)]
         if not rows:
-            return found, True
+            return _index_done(found, True)
         added = 0
         for task in rows:
             infohash = str(task.get("info_hash") or task.get("infohash") or "").lower()
@@ -542,20 +794,20 @@ def _offline_index(session) -> tuple[dict[str, dict], bool]:
         page_count = _meta_int(payload, ("page_count", "pageCount", "total_page", "pages"))
         total = _meta_int(payload, ("count", "total", "total_count", "task_count"))
         if page_count is not None and page >= page_count:
-            return found, True
+            return _index_done(found, True)
         # count 若只等于本页条数，它不是总任务数，不能在这里把列表当成已经看完。
         if total and len(found) >= total and total > len(rows):
-            return found, True
+            return _index_done(found, True)
         if page_count is None and total is None and len(rows) < _OFFLINE_PAGE_SIZE:
-            return found, True
+            return _index_done(found, True)
         if added == 0:
             # 满页又没有总页数，说明翻页没有前进，后面的任务可能还没看到。
             if page_count is None and len(rows) >= _OFFLINE_PAGE_SIZE:
-                return found, False
+                return _index_done(found, False)
             if page_count is not None and page < page_count:
-                return found, False
-            return found, True
-    return found, False
+                return _index_done(found, False)
+            return _index_done(found, True)
+    return _index_done(found, False)
 
 
 def _meta_int(payload, keys: tuple[str, ...]) -> int | None:
@@ -953,6 +1205,8 @@ def _flatten_list(session, root: str, depth: int) -> list[Node]:
     stack = [(norm(root), 0)]
     seen = set()
     while stack:
+        if _cancelled(session):
+            raise JobStopped("已停止")
         current, level = stack.pop()
         if current in seen or level > depth:
             continue
@@ -1015,7 +1269,7 @@ def _decide_move(task: dict, files: list[Node], library: str) -> dict:
 _SEASON_DIR = re.compile(r"^season\s*(\d{1,2})$", re.IGNORECASE)
 
 
-def _apply_strm(decision: dict, config: JobConfig, write: bool) -> None:
+def _apply_strm(decision: dict, config: JobConfig, write: bool, cancel=None) -> None:
     """整理成功后写 strm。strm 根为空就什么都不做。"""
     root = (config.strm_root or "").strip()
     if not root or decision.get("action") != "move":
@@ -1040,13 +1294,15 @@ def _apply_strm(decision: dict, config: JobConfig, write: bool) -> None:
     except PlayUrlError as exc:
         decision["strm_error"] = str(exc)
         return
+    decision["strm_relative"] = relative
+    decision["strm_url"] = url
     if not write:
         decision["strm"] = str(Path(root) / relative)
         return
     try:
-        decision["strm"] = write_strm(root, relative, url)
+        decision["strm"] = commit_strm(root, relative, url, cancel=cancel)
     except OSError as exc:
-        decision["strm_error"] = f"strm 写入失败：{exc}"
+        decision["strm_error"] = str(exc)
 
 
 def _library_videos(session, library: str, limit: str) -> list[dict]:
@@ -1079,7 +1335,7 @@ def _video_row(show: str, season_no: int, video: Node) -> dict:
     return {"show": show, "season": season, "episode": episode, "name": video.name, "node": video}
 
 
-def _strm_one(row: dict, config: JobConfig) -> dict:
+def _strm_one(row: dict, config: JobConfig, cancel=None) -> dict:
     video = row["node"]
     if row["season"] <= 0 or row["episode"] <= 0:
         return {"action": "skip", "reason": "集数对不上", "name": video.name, "path": ""}
@@ -1095,9 +1351,9 @@ def _strm_one(row: dict, config: JobConfig) -> dict:
     if config.dry_run:
         return {"action": "write", "reason": "ok", "name": video.name, "path": path}
     try:
-        written = write_strm(config.strm_root, relative, url)
+        written = commit_strm(config.strm_root, relative, url, cancel=cancel)
     except OSError as exc:
-        return {"action": "write", "reason": "strm 写入失败", "error": f"strm 写入失败：{exc}", "name": video.name, "path": path}
+        return {"action": "write", "reason": "strm 写入失败", "error": str(exc), "name": video.name, "path": path}
     return {"action": "write", "reason": "ok", "name": video.name, "path": written}
 
 
@@ -1121,7 +1377,8 @@ def _season_dir_number(name: str) -> int:
 
 
 def _public_move(decision: dict) -> dict:
-    return {key: value for key, value in decision.items() if key != "nodes"}
+    hidden = {"nodes", "strm_url", "strm_relative"}
+    return {key: value for key, value in decision.items() if key not in hidden}
 
 
 def _suffix(name: str) -> str:

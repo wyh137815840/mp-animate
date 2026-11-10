@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import re
+import shutil
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -61,6 +64,12 @@ def strm_relative(show_folder: str, season: int, episode: int, original_name: st
     return f"{show}/{season_dir}/{episode_strm_name(show_folder, season, episode, original_name)}"
 
 
+# 低于这个空闲量才把 errno 28 当成磁盘真的满了。共享预留过期时同样返回 28，但空间还在。
+_STALE_FREE_BYTES = 64 * 1024 * 1024
+_STRM_ATTEMPTS = 3
+_STRM_RETRY_PAUSE = 1.0
+
+
 def write_strm(root: str, relative: str, url: str) -> str:
     """把一行播放地址写到 strm 根下。不创建 nfo 或图片。"""
     base = Path(root).expanduser().resolve()
@@ -73,6 +82,79 @@ def write_strm(root: str, relative: str, url: str) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(url.strip() + "\n", encoding="utf-8")
     return str(target)
+
+
+def free_bytes(path: str) -> int | None:
+    """路径所在文件系统还剩多少字节。目录还不存在时看最近的已有上级。"""
+    probe = Path(path).expanduser()
+    try:
+        while not probe.exists():
+            if probe.parent == probe:
+                break
+            probe = probe.parent
+        return shutil.disk_usage(probe).free
+    except OSError:
+        return None
+
+
+def strm_write_failure(exc: OSError, root: str) -> str:
+    """写成日志和任务里能直接看的句子。有空闲时的 errno 28 不是磁盘已满。"""
+    if not _is_enospc(exc):
+        return f"strm 写入失败：{exc}"
+    free = free_bytes(root)
+    if free is None:
+        return f"strm 写入失败：errno 28，无法确认剩余空间：{exc}"
+    if free >= _STALE_FREE_BYTES:
+        return f"strm 写入失败：errno 28，{root} 仍有 {free} 字节空闲，这是共享预留过期"
+    return f"strm 写入失败：磁盘已满，剩余 {free} 字节"
+
+
+def commit_strm(root: str, relative: str, url: str, cancel=None, attempts: int | None = None, pause: float | None = None) -> str:
+    """写入 strm。共享预留过期时先重试几次；失败会记日志，并由调用方留到下一轮。"""
+    total = _STRM_ATTEMPTS if attempts is None else attempts
+    gap = _STRM_RETRY_PAUSE if pause is None else pause
+    last = "strm 写入失败"
+    for attempt in range(total):
+        try:
+            return write_strm(root, relative, url)
+        except OSError as exc:
+            last = strm_write_failure(exc, root)
+            _strm_log(last)
+            if not _stale_reservation(exc, root) or attempt + 1 == total or _event_set(cancel):
+                raise OSError(last) from exc
+            if gap and gap > 0:
+                if cancel is not None and hasattr(cancel, "wait"):
+                    cancel.wait(gap)
+                else:
+                    time.sleep(gap)
+            if _event_set(cancel):
+                raise OSError(last) from exc
+    raise OSError(last)
+
+
+def _stale_reservation(exc: OSError, root: str) -> bool:
+    if not _is_enospc(exc):
+        return False
+    free = free_bytes(root)
+    return free is not None and free >= _STALE_FREE_BYTES
+
+
+def _is_enospc(exc: OSError) -> bool:
+    number = getattr(exc, "errno", None)
+    return number in {28, errno.ENOSPC}
+
+
+def _event_set(cancel) -> bool:
+    return cancel is not None and cancel.is_set()
+
+
+def _strm_log(message: str) -> None:
+    try:
+        from app.log import logger
+        logger.warning(message)
+    except Exception:
+        import logging
+        logging.getLogger("anime115").warning(message)
 
 
 def _stem(name: str) -> str:
