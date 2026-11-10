@@ -422,10 +422,17 @@ class JobTest(unittest.TestCase):
         from anime115.anime_pan import _from_aps, _is_directory
 
         folder = _from_aps({"cid": "10", "fid": "", "fc": 0, "n": "魔法★探险家 - 06.mkv", "pid": "1"}, "1")
-        video = _from_aps({"fid": "81", "cid": "10", "fc": 1, "n": "魔法★探险家 - 06.mkv", "s": 900}, "10")
+        video = _from_aps({"fid": "81", "cid": "10", "fc": 1, "n": "魔法★探险家 - 06.mkv", "s": 900, "pick_code": "magiccode"}, "10")
+        season = _from_aps({"fid": "30", "cid": "20", "pid": "20", "fc": 0, "n": "Season 02", "pc": "seasonpick"}, "20")
         self.assertTrue(_is_directory(folder))
+        self.assertEqual(folder["fid"], "10")
         self.assertFalse(_is_directory(video))
         self.assertEqual(video["fn"], "魔法★探险家 - 06.mkv")
+        self.assertEqual(video["fid"], "81")
+        self.assertEqual(video["pc"], "magiccode")
+        self.assertTrue(_is_directory(season))
+        self.assertEqual(season["fid"], "30")
+        self.assertEqual(season["pc"], "seasonpick")
 
     def test_show_folder_prefers_exact_then_unique_year(self):
         names = ["冷淡的佐藤同学只对我撒娇 (2026)", "魔法★探险家 (2026)", "冷淡的佐藤同学只对我撒娇"]
@@ -468,6 +475,8 @@ class JobTest(unittest.TestCase):
         self.assertEqual(result["moves"][0]["dest_dir"], "/动漫/冷淡的佐藤同学只对我撒娇 (2026)/Season 01")
         self.assertEqual(result["moves"][1]["action"], "leave")
         self.assertEqual(result["moves"][1]["reason"], "建不了目标目录")
+        self.assertIn("无法创建 115 目录", result["moves"][1]["error"])
+        self.assertIn("/动漫/魔法★探险家 (2026)/Season 01", result["moves"][1]["error"])
         self.assertEqual(tasks[0]["status"], "moved")
         self.assertEqual(tasks[1]["status"], "submitted")
 
@@ -1187,6 +1196,121 @@ class CookiePanTest(unittest.TestCase):
         self.assertEqual(pan.ensure_dir("/离线下载/动漫"), "11")
         self.assertTrue(any(call[1].startswith("https://aps.115.com/natsort/files.php") for call in http.calls))
         self.assertFalse(any("/open/" in call[1] for call in http.calls))
+        self.assertFalse(any("/folder/update" in call[1] for call in http.calls))
+
+    def test_existing_season_id_is_not_the_parent_and_skips_mkdir(self):
+        pages = {
+            "0": [{"cid": "2", "fid": "", "fc": 0, "n": "动漫", "pid": "0"}],
+            "2": [{"fid": "5", "cid": "2", "pid": "2", "fc": 0, "n": "精灵幻想记 (2021)"}],
+            "5": [{"fid": "6", "cid": "5", "pid": "5", "fc": 0, "n": "Season 02", "pc": "seasonpick"}],
+        }
+        http = _PageHttp(pages)
+        pan = Pan115("UID=9_1", http=http, gap=0, client_factory=lambda _cookie: _FakeClient())
+        self.assertEqual(pan.ensure_dir("/动漫/精灵幻想记 (2021)/Season 02"), "6")
+        self.assertFalse(any(call[0] == "POST" for call in http.calls))
+        self.assertFalse(any("/folder/update" in call[1] for call in http.calls))
+
+    def test_missing_season_uses_fs_mkdir_and_existing_name_is_reused(self):
+        pages = {
+            "0": [{"cid": "2", "fid": "", "fc": 0, "n": "动漫", "pid": "0"}],
+            "2": [{"fid": "5", "cid": "2", "pid": "2", "fc": 0, "n": "精灵幻想记 (2021)"}],
+            "5": [{"fid": "6", "cid": "5", "pid": "5", "fc": 0, "n": "Season 02"}],
+        }
+        http = _PageHttp(pages)
+        http.add_after = ("5", {"fid": "7", "cid": "5", "pid": "5", "fc": 0, "n": "Season 01"})
+        pan = Pan115("UID=9_1", http=http, gap=0, client_factory=lambda _cookie: _FakeClient())
+        self.assertEqual(pan.ensure_dir("/动漫/精灵幻想记 (2021)/Season 01"), "7")
+        adds = [call for call in http.calls if call[1] == "https://webapi.115.com/files/add"]
+        self.assertEqual(len(adds), 1)
+        self.assertEqual(adds[0][2]["data"], {"pid": "5", "cname": "Season 01"})
+        self.assertIn("Chrome", adds[0][2]["headers"]["User-Agent"])
+        self.assertFalse(any("/folder/update" in call[1] for call in http.calls))
+        http.posts = [{"state": True, "errno": "", "cid": "8", "cname": "Season 03", "file_id": "8"}]
+        self.assertEqual(pan.ensure_dir("/动漫/精灵幻想记 (2021)/Season 03"), "8")
+        self.assertEqual(http.calls[-1][2]["data"], {"pid": "5", "cname": "Season 03"})
+
+    def test_mkdir_failure_keeps_115_body_and_does_not_use_folder_update(self):
+        pages = {
+            "0": [{"cid": "2", "fid": "", "fc": 0, "n": "动漫", "pid": "0"}],
+            "2": [],
+        }
+        http = _PageHttp(pages)
+        http.posts = [{"state": False, "errno": 20009, "error": "父目录不存在。"}]
+        pan = Pan115("UID=9_1", http=http, gap=0, client_factory=lambda _cookie: _FakeClient())
+        with self.assertRaises(RuntimeError) as caught:
+            pan.ensure_dir("/动漫/精灵幻想记")
+        text = str(caught.exception)
+        self.assertIn("/动漫/精灵幻想记", text)
+        self.assertIn("父目录不存在", text)
+        self.assertIn("20009", text)
+        self.assertFalse(any("/folder/update" in call[1] for call in http.calls))
+        self.assertTrue(any(call[1] == "https://webapi.115.com/files/add" for call in http.calls))
+
+    def test_unreadable_parent_is_not_created(self):
+        http = _PageHttp({})
+        http.status = 400
+        pan = Pan115("UID=9_1", http=http, gap=0, client_factory=lambda _cookie: _FakeClient())
+        with self.assertRaises(RuntimeError) as caught:
+            pan.ensure_dir("/动漫/Season 01")
+        self.assertIn("列目录失败", str(caught.exception))
+        self.assertIn("400", str(caught.exception))
+        self.assertFalse(any(call[0] == "POST" for call in http.calls))
+
+    def test_successful_move_still_writes_lan_strm(self):
+        show = "精灵幻想记 (2021)"
+        s2 = "[LoliHouse] 精灵幻想记 S02E08 [1080p].mkv"
+        s1 = "[LoliHouse] 精灵幻想记 S01E11 [1080p].mkv"
+        day = "20261110"
+        pages = {
+            "0": [
+                {"cid": "1", "fid": "", "fc": 0, "n": "离线下载", "pid": "0"},
+                {"cid": "2", "fid": "", "fc": 0, "n": "动漫", "pid": "0"},
+            ],
+            "1": [{"cid": "3", "fid": "", "fc": 0, "n": "动漫", "pid": "1"}],
+            "3": [{"cid": "4", "fid": "", "fc": 0, "n": day, "pid": "3"}],
+            "4": [
+                {"fid": "81", "cid": "4", "pid": "4", "fc": 1, "n": s2, "s": 900 * 1024 * 1024, "pick_code": "seirei-s2"},
+                {"fid": "82", "cid": "4", "pid": "4", "fc": 1, "n": s1, "s": 900 * 1024 * 1024, "pc": "seirei-s1"},
+            ],
+            "2": [{"fid": "5", "cid": "2", "pid": "2", "fc": 0, "n": show}],
+            "5": [{"fid": "6", "cid": "5", "pid": "5", "fc": 0, "n": "Season 02"}],
+        }
+        http = _PageHttp(pages)
+        http.posts = [{"state": True, "errno": "", "cid": "7", "file_name": "Season 01"}]
+        pan = Pan115("UID=9_1", http=http, gap=0, client_factory=lambda _cookie: _FinishedClient())
+        session = CookieSession("UID=9_1; CID=2; SEID=3; KID=4", None, pan)
+        tasks = [
+            {"infohash": HASH, "show": "精灵幻想记", "season": 2, "episode": 8, "title": s2, "folder": f"/离线下载/动漫/{day}", "status": "submitted"},
+            {"infohash": "b" * 40, "show": "精灵幻想记", "season": 1, "episode": 11, "title": s1, "folder": f"/离线下载/动漫/{day}", "status": "submitted"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_organize(tasks, session, JobConfig(
+                dry_run=False,
+                library_root="/动漫",
+                strm_root=tmp,
+                play_base=PLAY_BASE,
+                play_base_lan=PLAY_BASE_LAN,
+                strm_for="lan",
+            ))
+            self.assertEqual([item["action"] for item in result["moves"]], ["move", "move"])
+            self.assertEqual(result["moves"][0]["dest_dir"], f"/动漫/{show}/Season 02")
+            self.assertEqual(result["moves"][1]["dest_dir"], f"/动漫/{show}/Season 01")
+            adds = [call for call in http.calls if call[1] == "https://webapi.115.com/files/add"]
+            self.assertEqual([call[2]["data"]["cname"] for call in adds], ["Season 01"])
+            self.assertFalse(any("/folder/update" in call[1] for call in http.calls))
+            moves = [call for call in http.calls if call[1].endswith("/files/move")]
+            self.assertEqual([call[2]["data"]["to_cid"] for call in moves], ["6", "7"])
+            written = sorted(Path(tmp).rglob("*.strm"))
+            self.assertEqual(len(written), 2)
+            texts = [path.read_text(encoding="utf-8") for path in written]
+            self.assertTrue(all(text.startswith("http://192.168.1.9:3000/") for text in texts))
+            self.assertTrue(all("mp.yuanhot.top" not in text for text in texts))
+            joined = "\n".join(texts)
+            self.assertIn("pickcode=seirei-s2", joined)
+            self.assertIn("pickcode=seirei-s1", joined)
+            self.assertFalse(list(Path(tmp).rglob("*.nfo")))
+            self.assertEqual(tasks[0]["status"], "moved")
+            self.assertEqual(tasks[1]["status"], "moved")
 
 
 class ProgressTest(unittest.TestCase):
@@ -1271,7 +1395,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.19")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.20")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):
@@ -1356,6 +1480,47 @@ class _ScriptedHttp:
             if key == cid:
                 return _Resp({"state": True, "data": rows})
         return _Resp({"state": True, "data": []})
+
+
+class _PageHttp:
+    """按 cid 返回目录行。files/add 依次用 posts；没有 posts 时把 add_after 当成已存在。"""
+
+    def __init__(self, pages):
+        self.pages = {key: list(rows) for key, rows in pages.items()}
+        self.calls = []
+        self.posts = []
+        self.add_after = None
+        self.status = 200
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        if self.status != 200 and "natsort/files.php" in url:
+            return _Resp({"state": False, "error": "列目录失败"}, status=self.status)
+        if method == "POST" and url.endswith("/files/add"):
+            if self.add_after and not self.posts:
+                cid, row = self.add_after
+                self.pages.setdefault(cid, []).append(row)
+                self.add_after = None
+                return _Resp({"state": False, "errno": 20004, "error": "该目录名称已存在。"})
+            payload = self.posts.pop(0) if self.posts else {"state": True, "cid": "99"}
+            return _Resp(payload)
+        if "natsort/files.php" in url:
+            cid = str((kwargs.get("params") or {}).get("cid") or "")
+            return _Resp({"state": True, "data": list(self.pages.get(cid, []))})
+        return _Resp({"state": True, "data": []})
+
+
+class _FinishedClient:
+    def clouddownload_task_list(self, _payload):
+        return {
+            "page": 1,
+            "page_count": 1,
+            "count": 2,
+            "tasks": [
+                {"info_hash": HASH, "status": 2},
+                {"info_hash": "b" * 40, "status": 2},
+            ],
+        }
 
 
 class _FakeClient:

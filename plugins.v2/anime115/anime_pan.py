@@ -10,6 +10,11 @@ from .anime_names import join_path, norm
 
 _APP = "https://proapi.115.com/android"
 _APS_LIST = "https://aps.115.com/natsort/files.php"
+_FS_MKDIR = "https://webapi.115.com/files/add"
+_WEB_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 _PAGE = 500
 _RETRY_WAITS = (5, 20, 40)
 _RETRY_STATUS = {405, 429, 500, 502, 503, 504}
@@ -29,21 +34,55 @@ class Pan115:
         self._client_factory = client_factory or _p115_client
 
     def ensure_dir(self, path: str) -> str:
+        """逐级保证目录存在。已有的目录直接返回 id，不再打 /folder/update。"""
         folder = norm(path)
         parent = "0"
         built = ""
         for part in folder.strip("/").split("/") if folder != "/" else []:
             built += "/" + part
-            found = self._child_dir(built, parent, part)
+            found = self._child_dir(built, parent, part, strict=True)
             if found:
                 parent = found
                 continue
-            made = self._post("/folder/update", {"name": part, "pid": parent, "user_id": self.user_id})
-            parent = _id_of(made) or _id_of(made.get("data")) or self._child_dir(built, parent, part, fresh=True)
-            if not parent:
-                raise RuntimeError(f"无法创建 115 目录 {built}")
+            parent = self._mkdir(built, parent, part)
             self._dirs[built] = parent
         return parent
+
+    def _mkdir(self, built: str, parent: str, name: str) -> str:
+        """p115client.fs_mkdir：POST webapi /files/add。已存在则沿用现有 id。"""
+        try:
+            made = self._call(
+                "POST",
+                "/files/add",
+                url=_FS_MKDIR,
+                data={"pid": parent, "cname": name},
+                headers={"User-Agent": _WEB_UA},
+            )
+        except RuntimeError as exc:
+            if not _dir_exists_text(exc):
+                raise RuntimeError(f"无法创建 115 目录 {built}：{exc}") from exc
+            found = self._reuse_existing(built, parent, name)
+            if found:
+                return found
+            raise RuntimeError(f"无法创建 115 目录 {built}：{exc}") from exc
+        if _dir_exists_payload(made):
+            found = self._reuse_existing(built, parent, name)
+            if found:
+                return found
+            raise RuntimeError(f"无法创建 115 目录 {built}：{_err_text(made)}")
+        file_id = _usable_id(made)
+        if file_id:
+            return file_id
+        found = self._reuse_existing(built, parent, name)
+        if found:
+            return found
+        raise RuntimeError(f"无法创建 115 目录 {built}：{_err_text(made)}")
+
+    def _reuse_existing(self, built: str, parent: str, name: str) -> str:
+        found = self._child_dir(built, parent, name, fresh=True)
+        if found:
+            _log(f"动漫 115 目录已存在，沿用 {built} {found}", level="info")
+        return found
 
     def dir_id(self, path: str) -> str:
         folder = norm(path)
@@ -110,21 +149,31 @@ class Pan115:
                     data[key] = source[key]
         return {"data": data}
 
-    def _child_dir(self, path: str, parent: str, name: str, fresh: bool = False) -> str:
-        if not fresh and path in self._dirs:
+    def _child_dir(self, path: str, parent: str, name: str, fresh: bool = False, strict: bool = False) -> str:
+        if not fresh and self._dirs.get(path):
             return self._dirs[path]
+        list_error = None
         try:
             children = self.list_children(parent)
-        except RuntimeError:
+        except RuntimeError as exc:
             children = []
-        for child in children:
-            if _is_directory(child) and _name(child) == name:
-                self._dirs[path] = _file_id(child)
-                return self._dirs[path]
-        for item in self.search(name):
-            if _is_directory(item) and _name(item) == name and str(item.get("pid") or "") == parent:
-                self._dirs[path] = _file_id(item)
-                return self._dirs[path]
+            list_error = exc
+        found = _match_dir(children, name, parent, searched=False)
+        if found:
+            self._dirs[path] = found
+            return found
+        search_error = None
+        try:
+            found = _match_dir(self.search(name), name, parent, searched=True)
+        except RuntimeError as exc:
+            found = ""
+            search_error = exc
+        if found:
+            self._dirs[path] = found
+            return found
+        if strict and (list_error or search_error):
+            detail = list_error or search_error
+            raise RuntimeError(f"115 列目录失败 {path}：{detail}")
         return ""
 
     def search(self, keyword: str) -> list[dict]:
@@ -283,8 +332,7 @@ def _checked(response, path: str) -> dict:
     if not isinstance(payload, dict):
         return {}
     if payload.get("state") in (False, 0) and payload.get("errno") not in (None, 0, "0"):
-        message = payload.get("error") or payload.get("error_msg") or payload.get("message") or payload.get("errno")
-        raise RuntimeError(f"115 {path}：{message}")
+        raise RuntimeError(f"115 {path}：{_err_text(payload)}")
     return payload
 
 
@@ -311,35 +359,39 @@ def _task_rows(payload) -> list[dict]:
 
 
 def _from_aps(row: dict, directory_id: str) -> dict:
-    """aps 的目录用 cid 当自己的 id。文件有 fid，名字在 n 或 fn。fc 为 0 才是目录。"""
-    name = str(row.get("n") or row.get("fn") or "")
-    fid = str(row.get("fid") or "")
-    cid = str(row.get("cid") or "")
-    is_file = _aps_is_file(row)
-    if is_file:
+    """fc 为 0 才是目录。目录 id 用自己的 fid；cid 有时只是父目录，不能拿来当这一级。"""
+    name = str(row.get("n") or row.get("fn") or row.get("file_name") or row.get("name") or "")
+    fid = str(row.get("fid") or row.get("file_id") or "")
+    cid = str(row.get("cid") or row.get("category_id") or "")
+    parent = str(row.get("pid") or directory_id)
+    code = str(row.get("pc") or row.get("pickcode") or row.get("pick_code") or "")
+    if _aps_is_file(row):
         return {
             "fid": fid if fid and fid != "0" else cid,
             "fc": "1",
             "fn": name,
-            "pid": cid or str(row.get("pid") or directory_id),
+            "pid": cid or parent,
             "fs": row.get("s") or row.get("fs") or 0,
-            "pc": row.get("pc") or "",
+            "pc": code,
         }
     return {
-        "fid": cid or (fid if fid and fid != "0" else ""),
+        "fid": _own_id(fid, cid, parent),
         "fc": "0",
         "fn": name,
-        "pid": str(row.get("pid") or directory_id),
-        "pc": row.get("pc") or "",
+        "pid": parent,
+        "pc": code,
     }
 
 
 def _aps_is_file(row: dict) -> bool:
     """fc=0 是目录，哪怕名字以 .mkv 结尾。有 fc=1 或单独的 fid 才是文件。"""
+    ico = str(row.get("ico") or "").lower()
+    if ico in {"folder", "dir", "directory"}:
+        return False
     fc = row.get("fc")
     if fc is not None and str(fc) != "":
         return str(fc) != "0"
-    fid = str(row.get("fid") or "")
+    fid = str(row.get("fid") or row.get("file_id") or "")
     return bool(fid) and fid != "0"
 
 
@@ -354,6 +406,85 @@ def _id_of(payload) -> str:
         or payload.get("fid")
         or ""
     )
+
+
+def _usable_id(payload) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    found = _id_of(payload)
+    if found and found != "0":
+        return found
+    data = payload.get("data")
+    if isinstance(data, dict):
+        found = _id_of(data)
+        if found and found != "0":
+            return found
+    return ""
+
+
+def _own_id(fid: str, cid: str, parent: str) -> str:
+    """目录自己的 id。和父目录相同的 cid 不能当成这一级。"""
+    parent = str(parent or "")
+    for candidate in (str(fid or ""), str(cid or "")):
+        if candidate and candidate != "0" and candidate != parent:
+            return candidate
+    return ""
+
+
+def _err_text(payload: dict) -> str:
+    message = payload.get("error") or payload.get("error_msg") or payload.get("message") or ""
+    errno = payload.get("errno")
+    if errno in (None, "", 0, "0"):
+        errno = payload.get("errNo") or payload.get("errcode") or payload.get("code")
+    return f"{message} errno={errno} body={payload}"
+
+
+def _dir_exists_text(exc: BaseException) -> bool:
+    text = str(exc)
+    return "已存在" in text or "errno=20004" in text
+
+
+def _dir_exists_payload(payload) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("errno") or "") == "20004":
+        return True
+    message = str(payload.get("error") or payload.get("error_msg") or payload.get("message") or "")
+    return "已存在" in message
+
+
+def _same_dir_name(left: str, right: str) -> bool:
+    return (left or "").strip() == (right or "").strip()
+
+
+def _match_dir(rows, name: str, parent: str, searched: bool) -> str:
+    for item in rows:
+        if not isinstance(item, dict) or not _is_directory(item):
+            continue
+        if not _same_dir_name(_name(item), name):
+            continue
+        if searched and str(item.get("pid") or "") != str(parent):
+            continue
+        if searched:
+            file_id = _own_id(
+                str(item.get("fid") or item.get("file_id") or ""),
+                str(item.get("cid") or item.get("category_id") or ""),
+                str(item.get("pid") or parent),
+            )
+        else:
+            file_id = _file_id(item)
+        if file_id and file_id != "0" and file_id != str(parent):
+            return file_id
+    return ""
+
+
+def _log(message: str, level: str = "warning") -> None:
+    try:
+        from app.log import logger
+        getattr(logger, level, logger.warning)(message)
+    except Exception:
+        import logging
+        getattr(logging.getLogger("anime115"), level, logging.warning)(message)
 
 
 def _file_id(item: dict) -> str:
