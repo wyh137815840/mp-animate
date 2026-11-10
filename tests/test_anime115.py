@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -1356,8 +1358,24 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(format_progress({}), "进度：还没有运行记录")
 
 
+def _install_fastapi_stub() -> None:
+    """宿主才有 fastapi。单测里缺它时补一个空模块，导入插件不会去连网。"""
+    if "fastapi" in sys.modules and hasattr(sys.modules["fastapi"], "Request"):
+        return
+    fastapi = types.ModuleType("fastapi")
+    fastapi.Request = object
+    responses = types.ModuleType("fastapi.responses")
+    responses.JSONResponse = object
+    responses.RedirectResponse = object
+    responses.Response = object
+    fastapi.responses = responses
+    sys.modules["fastapi"] = fastapi
+    sys.modules["fastapi.responses"] = responses
+
+
 class ImportTest(unittest.TestCase):
     def test_package_import_leaves_no_bare_module(self):
+        _install_fastapi_stub()
         app = types.ModuleType("app")
         app.__path__ = []
         chain = types.ModuleType("app.chain")
@@ -1395,7 +1413,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.20")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.21")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):
@@ -1680,6 +1698,379 @@ class _RepeatingOffline(_Fake):
             {"info_hash": f"{index:02d}{'ab' * 19}", "status": 2}
             for index in range(20)
         ]}}
+
+
+class ClosedLoopTest(unittest.TestCase):
+    def test_offline_list_timeout_logs_and_the_next_run_still_moves(self):
+        from anime115 import anime_jobs
+
+        release = threading.Event()
+
+        class Hang(_Fake):
+            def list_offline(self, _page):
+                release.wait(5)
+                return {"data": {"tasks": []}}
+
+        session = Hang()
+        video = "佐藤同学 - 03.mkv"
+        node = Node("/box/" + video, video, False, 900 * 1024 * 1024, raw={"pc": "satocode"})
+        session.dirs["/box"] = [node]
+        tasks = [{
+            "infohash": HASH,
+            "show": "佐藤同学",
+            "season": 1,
+            "episode": 3,
+            "title": "佐藤同学 - 03",
+            "folder": "/box",
+            "status": "submitted",
+        }]
+        logs = []
+        previous = anime_jobs._OFFLINE_CALL_TIMEOUT
+        previous_log = anime_jobs._job_log
+        anime_jobs._OFFLINE_CALL_TIMEOUT = 0.2
+        anime_jobs._job_log = lambda message, level="info": logs.append(message)
+        started = time.monotonic()
+        try:
+            result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        finally:
+            release.set()
+            anime_jobs._OFFLINE_CALL_TIMEOUT = previous
+            anime_jobs._job_log = previous_log
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertFalse(result["ok"])
+        self.assertIn("离线列表超时", result["error"])
+        self.assertEqual(tasks[0]["status"], "submitted")
+        self.assertEqual(session.moves, [])
+        self.assertTrue(any("第 1 页" in line for line in logs))
+        follow = _Fake()
+        follow.offline = [{"info_hash": HASH, "status": 2}]
+        follow.dirs["/box"] = [node]
+        again = run_organize(tasks, follow, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertEqual(again["moves"][0]["action"], "move")
+        self.assertEqual(tasks[0]["status"], "moved")
+
+    def test_stop_keeps_the_finished_move_and_leaves_the_rest(self):
+        class StopAfterSleep(_Fake):
+            def __init__(self):
+                super().__init__()
+                self.cancel = threading.Event()
+
+            def sleep(self, _seconds):
+                self.cancel.set()
+
+        session = StopAfterSleep()
+        first = "佐藤同学 - 03.mkv"
+        second = "佐藤同学 - 04.mkv"
+        session.offline = [
+            {"info_hash": HASH, "status": 2},
+            {"info_hash": "b" * 40, "status": 2},
+        ]
+        session.dirs["/box/a"] = [Node("/box/a/" + first, first, False, 900 * 1024 * 1024)]
+        session.dirs["/box/b"] = [Node("/box/b/" + second, second, False, 900 * 1024 * 1024)]
+        tasks = [
+            {"infohash": HASH, "show": "佐藤同学", "season": 1, "episode": 3, "title": "佐藤同学 - 03", "folder": "/box/a", "status": "submitted"},
+            {"infohash": "b" * 40, "show": "佐藤同学", "season": 1, "episode": 4, "title": "佐藤同学 - 04", "folder": "/box/b", "status": "submitted"},
+        ]
+        seen = {"hashes": {
+            HASH: {"status": "submitted"},
+            "b" * 40: {"status": "submitted"},
+        }}
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"), seen=seen)
+        self.assertEqual(result["error"], "已停止")
+        self.assertTrue(result["persist"])
+        self.assertEqual(tasks[0]["status"], "moved")
+        self.assertEqual(tasks[1]["status"], "submitted")
+        self.assertEqual(seen["hashes"][HASH]["status"], "moved")
+        self.assertEqual(seen["hashes"]["b" * 40]["status"], "submitted")
+        self.assertEqual([item[2] for item in session.moves], [first])
+        follow = _Fake()
+        follow.offline = session.offline
+        follow.dirs = session.dirs
+        again = run_organize(tasks, follow, JobConfig(dry_run=False, library_root="/动漫"), seen=seen)
+        self.assertTrue(again["ok"])
+        self.assertEqual([item[2] for item in follow.moves], [second])
+        self.assertEqual(tasks[1]["status"], "moved")
+
+    def test_stop_during_offline_list_does_not_drop_the_title(self):
+        release = threading.Event()
+
+        class Hang(_Fake):
+            def __init__(self):
+                super().__init__()
+                self.cancel = threading.Event()
+
+            def list_offline(self, _page):
+                release.wait(5)
+                return {"data": {"tasks": []}}
+
+        session = Hang()
+        tasks = [{
+            "infohash": HASH,
+            "show": "佐藤同学",
+            "season": 1,
+            "episode": 3,
+            "title": "佐藤同学 - 03",
+            "folder": "/box",
+            "status": "submitted",
+        }]
+        threading.Thread(target=lambda: (time.sleep(0.05), session.cancel.set()), daemon=True).start()
+        started = time.monotonic()
+        try:
+            result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        finally:
+            release.set()
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(result["error"], "已停止")
+        self.assertEqual(tasks[0]["status"], "submitted")
+        self.assertEqual(session.moves, [])
+
+    def test_daily_stop_keeps_the_submit_already_done(self):
+        show = parse_watchlist("佐藤同学")[0]
+        first = Torrent("佐藤同学 - 03 [1080p][简体]", HASH, f"magnet:?xt=urn:btih:{HASH}", 900 * 1024 * 1024, NOW)
+        second = Torrent("佐藤同学 - 04 [1080p][简体]", "b" * 40, "magnet:?xt=urn:btih:" + "b" * 40, 900 * 1024 * 1024, NOW)
+
+        class StopAfterAdd(_Fake):
+            def __init__(self):
+                super().__init__()
+                self.cancel = threading.Event()
+
+            def add_offline(self, magnet, fileid):
+                added = super().add_offline(magnet, fileid)
+                self.cancel.set()
+                return added
+
+        session = StopAfterAdd()
+        seen = {}
+        result = run_daily([show], session, lambda _show: [first, second], seen, NOW, JobConfig(dry_run=False))
+        self.assertEqual(result["error"], "已停止")
+        self.assertTrue(result["persist"])
+        self.assertEqual(len(result["submitted"]), 1)
+        self.assertEqual(len(session.added), 1)
+        self.assertEqual(len(seen["hashes"]), 1)
+
+    def test_flatten_stop_moves_nothing(self):
+        session = _Fake()
+        session.cancel = threading.Event()
+        session.cancel.set()
+        session.dirs["/inbox"] = [Node("/inbox/show", "show", True)]
+        session.dirs["/inbox/show"] = [Node("/inbox/show/extra", "extra", True)]
+        session.dirs["/inbox/show/extra"] = [Node("/inbox/show/extra/E01.mkv", "E01.mkv", False, 900 * 1024 * 1024)]
+        result = run_flatten(session, JobConfig(dry_run=False, flatten_apply=True, flatten_roots=["/inbox"]))
+        self.assertEqual(result["error"], "已停止")
+        self.assertEqual(result["moved"], 0)
+        self.assertEqual(session.moves, [])
+
+    def test_stale_reservation_is_not_disk_full_and_retries_next_organize(self):
+        from anime115 import anime_strm
+
+        calls = {"n": 0}
+        logged = []
+        real_write = anime_strm.write_strm
+        real_free = anime_strm.free_bytes
+        real_log = anime_strm._strm_log
+        real_pause = anime_strm._STRM_RETRY_PAUSE
+
+        def flaky(root, relative, url):
+            calls["n"] += 1
+            if calls["n"] <= 3:
+                raise OSError(28, "No space left on device")
+            return real_write(root, relative, url)
+
+        anime_strm.write_strm = flaky
+        anime_strm.free_bytes = lambda _path: 200 * 1024 ** 3
+        anime_strm._strm_log = logged.append
+        anime_strm._STRM_RETRY_PAUSE = 0
+        video = "佐藤同学 - 03.mkv"
+        session = _Fake()
+        session.offline = [{"info_hash": HASH, "status": 2}]
+        session.dirs["/box"] = [Node("/box/" + video, video, False, 900 * 1024 * 1024, raw={"pc": "satocode"})]
+        tasks = [{
+            "infohash": HASH,
+            "show": "佐藤同学",
+            "season": 1,
+            "episode": 3,
+            "title": "佐藤同学 - 03",
+            "folder": "/box",
+            "status": "submitted",
+        }]
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                config = JobConfig(
+                    dry_run=False,
+                    library_root="/动漫",
+                    strm_root=tmp,
+                    play_base=PLAY_BASE,
+                    play_base_lan=PLAY_BASE_LAN,
+                    strm_for="lan",
+                )
+                result = run_organize(tasks, session, config)
+                self.assertEqual(result["moves"][0]["action"], "move")
+                self.assertEqual(tasks[0]["status"], "moved")
+                self.assertEqual(tasks[0]["strm_status"], "failed")
+                self.assertIn("共享预留", result["strm_error"])
+                self.assertNotIn("磁盘已满", result["strm_error"])
+                self.assertEqual(list(Path(tmp).rglob("*.strm")), [])
+                self.assertTrue(any("共享预留" in line for line in logged))
+                self.assertEqual(len(session.moves), 1)
+                again = run_organize(tasks, session, config)
+                written = list(Path(tmp).rglob("*.strm"))
+                self.assertEqual(len(written), 1)
+                self.assertTrue(written[0].read_text(encoding="utf-8").startswith("http://192.168.1.9:3000/"))
+                self.assertEqual(tasks[0]["strm_status"], "written")
+                self.assertEqual(len(session.moves), 1)
+                self.assertNotIn("磁盘已满", again.get("strm_error", ""))
+        finally:
+            anime_strm.write_strm = real_write
+            anime_strm.free_bytes = real_free
+            anime_strm._strm_log = real_log
+            anime_strm._STRM_RETRY_PAUSE = real_pause
+
+    def test_real_enospc_is_disk_full_without_retry(self):
+        from anime115 import anime_strm
+        from anime115.anime_strm import commit_strm
+
+        calls = {"n": 0}
+        logged = []
+        real_write = anime_strm.write_strm
+        real_free = anime_strm.free_bytes
+        real_log = anime_strm._strm_log
+        real_pause = anime_strm._STRM_RETRY_PAUSE
+
+        def fail(_root, _relative, _url):
+            calls["n"] += 1
+            raise OSError(28, "No space left on device")
+
+        anime_strm.write_strm = fail
+        anime_strm.free_bytes = lambda _path: 0
+        anime_strm._strm_log = logged.append
+        anime_strm._STRM_RETRY_PAUSE = 0
+        try:
+            with self.assertRaises(OSError) as caught:
+                commit_strm("/media/动漫", "剧/Season 01/a.strm", "http://192.168.1.9:3000/a")
+        finally:
+            anime_strm.write_strm = real_write
+            anime_strm.free_bytes = real_free
+            anime_strm._strm_log = real_log
+            anime_strm._STRM_RETRY_PAUSE = real_pause
+        self.assertEqual(calls["n"], 1)
+        self.assertIn("磁盘已满", str(caught.exception))
+        self.assertNotIn("共享预留", str(caught.exception))
+        self.assertTrue(any("磁盘已满" in line for line in logged))
+
+    def test_other_strm_error_is_not_called_disk_full(self):
+        from anime115 import anime_strm
+        from anime115.anime_strm import commit_strm
+
+        calls = {"n": 0}
+        logged = []
+        real_write = anime_strm.write_strm
+        real_log = anime_strm._strm_log
+
+        def fail(_root, _relative, _url):
+            calls["n"] += 1
+            raise OSError(13, "Permission denied")
+
+        anime_strm.write_strm = fail
+        anime_strm._strm_log = logged.append
+        try:
+            with self.assertRaises(OSError) as caught:
+                commit_strm("/media/动漫", "剧/Season 01/a.strm", "http://192.168.1.9:3000/a")
+        finally:
+            anime_strm.write_strm = real_write
+            anime_strm._strm_log = real_log
+        self.assertEqual(calls["n"], 1)
+        self.assertNotIn("磁盘已满", str(caught.exception))
+        self.assertNotIn("共享预留", str(caught.exception))
+        self.assertTrue(logged)
+        self.assertNotIn("磁盘已满", logged[0])
+
+    def test_reload_releases_the_lock_and_logs_the_end(self):
+        plugin = _load_plugin_module()
+        logs = []
+
+        def record(message, *args, **kwargs):
+            logs.append(str(message))
+
+        plugin.logger = types.SimpleNamespace(info=record, warning=record, error=record)
+        host = plugin.Anime115()
+        host.update_config = lambda _config: None
+        host.get_data = lambda _key=None: []
+        host.save_data = lambda *_args, **_kwargs: None
+        config = {"enabled": True, "organize_cron": "*/30 * * * *", "dry_run": True}
+        host.init_plugin(config)
+        entered = threading.Event()
+
+        def blocked():
+            cancel = host._cancel
+            entered.set()
+            cancel.wait(3)
+            if cancel.is_set():
+                return {"ok": False, "error": "已停止", "dry_run": True}
+            return {"ok": True, "dry_run": True}
+
+        outcome = {}
+
+        def run():
+            outcome["value"] = host._guard("organize", blocked)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        self.assertTrue(entered.wait(2))
+        overlap = host._guard("organize", lambda: {"ok": True, "dry_run": True})
+        self.assertEqual(overlap["error"], "已有任务在运行")
+        host.init_plugin(config)
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcome["value"]["error"], "已停止")
+        self.assertTrue(any("organize 结束：已停止" in line for line in logs))
+        self.assertTrue(any("已有任务在运行" in line for line in logs))
+        again = host._guard("organize", lambda: {"ok": True, "dry_run": True})
+        self.assertTrue(again["ok"])
+        self.assertFalse(host._lock.locked())
+        self.assertTrue(any("organize 结束：完成" in line for line in logs))
+
+
+def _load_plugin_module():
+    _install_fastapi_stub()
+    app = sys.modules.get("app")
+    if app is None:
+        app = types.ModuleType("app")
+        app.__path__ = []
+        sys.modules["app"] = app
+    if "app.chain" not in sys.modules:
+        chain = types.ModuleType("app.chain")
+        chain.__path__ = []
+        storage = types.ModuleType("app.chain.storage")
+
+        class StorageChain:
+            pass
+
+        storage.StorageChain = StorageChain
+        sys.modules["app.chain"] = chain
+        sys.modules["app.chain.storage"] = storage
+    if "app.log" not in sys.modules:
+        log = types.ModuleType("app.log")
+        log.logger = types.SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None, error=lambda *_a, **_k: None)
+        sys.modules["app.log"] = log
+    if "app.plugins" not in sys.modules:
+        plugins = types.ModuleType("app.plugins")
+        plugins.__path__ = []
+
+        class _PluginBase:
+            pass
+
+        plugins._PluginBase = _PluginBase
+        sys.modules["app.plugins"] = plugins
+    name = "app.plugins.anime115"
+    spec = importlib.util.spec_from_file_location(
+        name,
+        _ROOT / "__init__.py",
+        submodule_search_locations=[str(_ROOT)],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ from .anime_pan import CookieSession
 from .anime_progress import advance, format_progress, format_state
 from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
 from .anime_flatten import Node
-from .anime_jobs import JobConfig, new_task, run_daily, run_flatten, run_organize, run_strm as write_library_strm
+from .anime_jobs import JobConfig, JobStopped, new_task, run_daily, run_flatten, run_organize, run_strm as write_library_strm
 from .anime_names import Show, norm, parse_watchlist
 from .anime_subscribe import load_mp_subscriptions, shows_from_subscriptions
 from .anime_tmdb import live_bounds, shanghai_today
@@ -50,7 +50,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.20"
+    plugin_version = "1.0.21"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -99,6 +99,7 @@ class Anime115(_PluginBase):
         previous = getattr(self, "_cancel", None)
         if previous is not None:
             previous.set()
+            logger.info("动漫 115 重载：已要求上一轮任务结束")
         self._cancel = threading.Event()
         config = dict(config or {})
         self._enabled = bool(config.get("enabled"))
@@ -343,10 +344,11 @@ class Anime115(_PluginBase):
         ]
 
     def stop_service(self):
-        """让正在跑的循环在下一轮停下。"""
+        """让正在跑的任务停下来并自己写下结束状态。"""
         cancel = getattr(self, "_cancel", None)
         if cancel is not None:
             cancel.set()
+            logger.info("动漫 115 停止：已要求正在运行的任务结束")
 
     def api_run(self, job: str = "daily", root: str = "", **kwargs) -> dict:
         """按 job 启动任务。strm 的 root 只补那一部剧。"""
@@ -456,6 +458,7 @@ class Anime115(_PluginBase):
             logger.info("动漫 115 已有任务在运行")
             return {"ok": False, "error": "已有任务在运行"}
         try:
+            logger.info(f"动漫 115 {kind} 开始")
             payload = func()
             payload["job"] = kind
             payload["finished_at"] = _now()
@@ -469,7 +472,24 @@ class Anime115(_PluginBase):
             self.save_data("last_run", payload)
             self._push_history(payload)
             self._announce(payload)
-            logger.info(f"动漫 115 {kind} 结束：{payload.get('error') or '完成'}")
+            detail = payload.get("error") or "完成"
+            note = payload.get("strm_error") or ""
+            if note:
+                detail = f"{detail}，{note}"
+            logger.info(f"动漫 115 {kind} 结束：{detail}")
+            return payload
+        except JobStopped:
+            logger.info(f"动漫 115 {kind} 结束：已停止")
+            self._report({"job": kind, "phase": "failed", "dry_run": self._dry_run, "result": "已停止"})
+            payload = {
+                "ok": False,
+                "job": kind,
+                "error": "已停止",
+                "finished_at": _now(),
+                "progress": self._progress.get("progress"),
+                "state": self._progress.get("state"),
+            }
+            self.save_data("last_run", payload)
             return payload
         except Exception as exc:
             logger.error(f"动漫 115 {kind} 失败：{exc}", exc_info=True)
@@ -521,10 +541,12 @@ class Anime115(_PluginBase):
         gap = {"done": False}
         config = self._config()
         config.search.bounds_of = live_bounds(self._tmdb_api_key, shanghai_today(moment))
+        session = self._mp_session()
+        cancel = getattr(session, "cancel", None)
         result = run_daily(
             shows,
-            self._mp_session(),
-            lambda show: _entries_for(show, self._stopped, gap),
+            session,
+            lambda show: _entries_for(show, cancel, gap),
             seen,
             moment,
             config,
@@ -537,7 +559,8 @@ class Anime115(_PluginBase):
         ]
         result["subscribe_source"] = prepared["source"]
         result["anime_count"] = len(shows)
-        if not result.get("dry_run") and result.get("ok"):
+        persist = result.pop("persist", False)
+        if not result.get("dry_run") and (result.get("ok") or persist):
             self.save_data("seen", seen)
             for row in result.get("submitted") or []:
                 tasks.append(new_task(row, result.get("inbox") or "", moment))
@@ -592,7 +615,8 @@ class Anime115(_PluginBase):
             seen = {}
         result = run_organize(tasks, self._session(), self._config(), report=self._report, seen=seen)
         changed = result.pop("seen_changed", False)
-        if not result.get("dry_run") and result.get("ok"):
+        persist = result.pop("persist", False)
+        if not result.get("dry_run") and (result.get("ok") or persist):
             self.save_data("tasks", tasks)
             if changed:
                 self.save_data("seen", seen)
@@ -703,7 +727,7 @@ class Anime115(_PluginBase):
             return
         if payload.get("dry_run") and not (payload.get("picks") or payload.get("proposals") or payload.get("moves")):
             return
-        if payload.get("error"):
+        if payload.get("error") or payload.get("strm_error"):
             return
         try:
             from app.schemas.types import NotificationType
@@ -842,18 +866,20 @@ class _Mp115:
         return U115Pan()._request_api("GET", "/open/offline/get_quota_info")
 
 
-def _entries_for(show: Show, stopped, gap: dict) -> list:
+def _entries_for(show: Show, cancel, gap: dict) -> list:
     """每部剧查一次 RSS。体积还没有时再查列表页。相邻请求至少隔 2 秒。"""
-    if stopped():
+    if _event_set(cancel):
         return []
     if gap.get("done"):
-        time.sleep(2)
+        _pause(cancel, 2)
+    if _event_set(cancel):
+        return []
     gap["done"] = True
     torrents = parse_rss(fetch_rss(show.keyword))
-    if stopped() or all(item.size for item in torrents):
+    if _event_set(cancel) or all(item.size for item in torrents):
         return torrents
-    time.sleep(2)
-    if stopped():
+    _pause(cancel, 2)
+    if _event_set(cancel):
         return torrents
     try:
         sizes = parse_list_sizes(fetch_list(show.keyword))
@@ -897,6 +923,17 @@ def _area(model: str, label: str, placeholder: str) -> dict:
             "props": {"model": model, "label": label, "placeholder": placeholder, "rows": 4},
         }],
     }
+
+
+def _event_set(cancel) -> bool:
+    return cancel is not None and cancel.is_set()
+
+
+def _pause(cancel, seconds: float) -> None:
+    if cancel is not None and hasattr(cancel, "wait"):
+        cancel.wait(seconds)
+        return
+    time.sleep(seconds)
 
 
 def _subscribe_source(value) -> str:
