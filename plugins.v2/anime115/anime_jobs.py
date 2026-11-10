@@ -94,7 +94,7 @@ def _organize_status(config: JobConfig, moves, *, error: str = "", stopped: bool
         error = "已停止"
     seen_changed = False
     if not config.dry_run and tasks is not None and (not error or dirty):
-        seen_changed = _mark_seen_moved(tasks, seen)
+        seen_changed = _sync_seen_status(tasks, seen)
     public = [_public_move(item) for item in moves]
     payload = {
         "ok": not error,
@@ -321,6 +321,7 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
 
     完成可以来自整份离线列表，不限前 5 页。列表已经翻完、任务却不在里面时，
     仍按提交时记下的日期收件箱整理。列表里还在下载或失败的不动。
+    已经搬走的，和确认这一包里没有视频的，都不再扫。
     """
     library = strip_mount_prefix(config.library_root, config.mount_prefix) if config.library_root else ""
     if _cancelled(session):
@@ -348,7 +349,7 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
         return _organize_status(config, pending, error=f"离线列表超时：{exc}", dirty=dirty, tasks=tasks, seen=seen)
     work = []
     for task in tasks:
-        if not isinstance(task, dict) or task.get("status") == "moved":
+        if not isinstance(task, dict) or task.get("status") in _ORGANIZE_DONE:
             continue
         infohash = str(task.get("infohash") or "").lower()
         if not infohash:
@@ -403,13 +404,14 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
 
 
 def _organize_one(task, session, library, config, moves, offline=None) -> None:
-    files, pack, why = _scope_to_pack(session, task, offline or {})
+    files, pack, why, confirmed = _scope_to_pack(session, task, offline or {})
     if why:
         moves.append({"action": "leave", "reason": why, "task": task.get("infohash"), "nodes": [], "pack": pack})
         return
     decision = _decide_move(task, files, library)
     decision["pack"] = pack
     moves.append(decision)
+    _close_empty_leftover(task, decision, confirmed, config)
     if decision["action"] == "move":
         show_folder, why = _show_folder(session, library, task.get("show") or "")
         if why:
@@ -835,6 +837,10 @@ def _plain_int(value) -> int | None:
     return None
 
 
+# moved 是已经入库。no_video 是确认这一包里没有视频。两条都不再扫。
+_ORGANIZE_DONE = {"moved", "no_video"}
+
+
 def _include_seen(tasks, seen) -> None:
     """tasks 里没有、但 seen 里还记着的提交，也拿去对收件箱。"""
     if not isinstance(tasks, list) or not isinstance(seen, dict):
@@ -851,7 +857,7 @@ def _include_seen(tasks, seen) -> None:
         key = str(infohash or "").lower()
         if not key or key in known or not isinstance(row, dict):
             continue
-        if row.get("status") == "moved":
+        if row.get("status") in _ORGANIZE_DONE:
             continue
         folder = str(row.get("folder") or "").strip()
         if not folder:
@@ -868,7 +874,8 @@ def _include_seen(tasks, seen) -> None:
         known.add(key)
 
 
-def _mark_seen_moved(tasks, seen) -> bool:
+def _sync_seen_status(tasks, seen) -> bool:
+    """把任务上已经结束的状态写回 seen。no_video 不是 moved，也不放开当天的提交。"""
     if not isinstance(seen, dict):
         return False
     hashes = seen.get("hashes")
@@ -876,11 +883,14 @@ def _mark_seen_moved(tasks, seen) -> bool:
         return False
     changed = False
     for task in tasks:
-        if not isinstance(task, dict) or task.get("status") != "moved":
+        if not isinstance(task, dict):
+            continue
+        status = task.get("status")
+        if status not in _ORGANIZE_DONE:
             continue
         row = hashes.get(str(task.get("infohash") or "").lower())
-        if isinstance(row, dict) and row.get("status") != "moved":
-            row["status"] = "moved"
+        if isinstance(row, dict) and row.get("status") != status:
+            row["status"] = status
             changed = True
     return changed
 
@@ -955,38 +965,79 @@ def _episode_of_name(name: str) -> tuple[int, int] | None:
     return parse_episode(text)
 
 
-def _scope_to_pack(session, task: dict, offline: dict) -> tuple[list[Node], str, str]:
-    """只看这一条磁力自己的目录，不扫同一天里的其它包。"""
+def _scope_to_pack(session, task: dict, offline: dict) -> tuple[list[Node], str, str, bool]:
+    """只看这一条磁力自己的目录，不扫同一天里的其它包。
+
+    最后一个值表示这一包是不是已经看到了。空列表也可能是路径不存在。
+    """
     inbox = norm(task.get("folder") or "")
     if not inbox:
-        return [], "", "没有离线目录"
+        return [], "", "没有离线目录", False
     wanted = _wanted_names(task, offline)
     file_id = _offline_file_id(offline)
     children = list(session.list_dir(inbox) or [])
     if _folder_is_pack(inbox, wanted):
-        return _flatten_list(session, inbox, depth=3), inbox, ""
+        files = _flatten_list(session, inbox, depth=3)
+        return files, inbox, "", _pack_seen(session, inbox, children, files)
     chosen, why = _choose_child(children, wanted, file_id)
     if why:
-        return [], "", why
+        return [], "", why, False
     if chosen is None and file_id:
         chosen, why = _choose_by_nested_id(session, children, file_id)
     if why:
-        return [], "", why
+        return [], "", why, False
     if chosen is not None:
         if chosen.is_dir:
-            return _flatten_list(session, chosen.path, depth=3), chosen.path, ""
-        return _file_and_sidecars(children, chosen), chosen.path, ""
+            return _flatten_list(session, chosen.path, depth=3), chosen.path, "", True
+        return _file_and_sidecars(children, chosen), chosen.path, "", True
     dirs = [item for item in children if item.is_dir]
     if not dirs:
         videos = _real_videos(children)
         if len(videos) > 1 and wanted:
             matched = _match_one(videos, wanted)
             if len(matched) == 1:
-                return _file_and_sidecars(children, matched[0]), matched[0].path, ""
-        return _flatten_list(session, inbox, depth=3), inbox, ""
+                return _file_and_sidecars(children, matched[0]), matched[0].path, "", True
+        files = _flatten_list(session, inbox, depth=3)
+        return files, inbox, "", _pack_seen(session, inbox, children, files)
     label = wanted[0] if wanted else (task.get("show") or task.get("infohash") or "")
     listed = "、".join(item.name for item in dirs[:8])
-    return [], "", f"找不到这一包：{label}；现有 {listed}"
+    return [], "", f"找不到这一包：{label}；现有 {listed}", False
+
+
+def _close_empty_leftover(task: dict, decision: dict, confirmed: bool, config: JobConfig) -> None:
+    """这一包已经列出来、里面确实没有视频，才结束任务。
+
+    找不到包、目录不存在、集数对不上都留着。no_video 不是整理成功，也不是建目录失败。
+    """
+    if config.dry_run or not confirmed:
+        return
+    if decision.get("action") != "leave" or decision.get("reason") != "没有视频":
+        return
+    task["status"] = "no_video"
+    task["reason"] = "没有视频"
+
+
+def _pack_seen(session, folder: str, children: list, files: list) -> bool:
+    """看到里面的文件，或父目录里有这一层，才算这一包存在。"""
+    if children or files:
+        return True
+    return _dir_listed(session, folder)
+
+
+def _dir_listed(session, folder: str) -> bool:
+    folder = norm(folder)
+    if not folder or folder == "/":
+        return False
+    parent = parent_path(folder)
+    leaf = name_of(folder)
+    try:
+        children = session.list_dir(parent) or []
+    except Exception:
+        return False
+    for item in children:
+        if getattr(item, "name", "") == leaf or norm(getattr(item, "path", "")) == folder:
+            return True
+    return False
 
 
 def _wanted_names(task: dict, offline: dict) -> list[str]:

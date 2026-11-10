@@ -1413,7 +1413,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.21")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.22")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):
@@ -1616,6 +1616,7 @@ class _Fake:
         self.dirs = {}
         self.offline = []
         self.deleted = []
+        self.listed = []
 
     def check_login(self):
         return True
@@ -1637,6 +1638,7 @@ class _Fake:
         return {"data": {"tasks": self.offline}}
 
     def list_dir(self, path):
+        self.listed.append(path)
         return list(self.dirs.get(path, []))
 
     def move(self, node, dest_dir, new_name):
@@ -1701,6 +1703,186 @@ class _RepeatingOffline(_Fake):
 
 
 class ClosedLoopTest(unittest.TestCase):
+    def test_empty_leftover_packs_are_not_walked_on_the_next_organize(self):
+        """295 条已完成、包里已经没有视频的提交，整理完成后下一轮不再扫。"""
+        day = "/离线下载/动漫/20261110"
+        count = 295
+        session = _Fake()
+        session.dirs[day] = []
+        tasks = []
+        seen = {"hashes": {}}
+        for index in range(count):
+            infohash = f"{index:040x}"
+            pack_name = f"Show{index:03d} - 01.mkv"
+            pack = f"{day}/{pack_name}"
+            title = f"Show{index:03d} - 01"
+            session.dirs[day].append(Node(pack, pack_name, True, raw={"fid": f"pack-{index}"}))
+            if index % 2:
+                session.dirs[pack] = []
+            else:
+                sub = title + ".ass"
+                session.dirs[pack] = [Node(f"{pack}/{sub}", sub, False, 100)]
+            session.offline.append({
+                "info_hash": infohash,
+                "status": 2,
+                "name": pack_name,
+                "file_id": f"pack-{index}",
+            })
+            tasks.append({
+                "infohash": infohash,
+                "show": f"剧{index:03d}",
+                "season": 1,
+                "episode": 1,
+                "title": title,
+                "folder": day,
+                "status": "submitted",
+            })
+            seen["hashes"][infohash] = {
+                "status": "submitted",
+                "folder": day,
+                "show": f"剧{index:03d}",
+                "season": 1,
+                "episode": 1,
+                "title": title,
+                "at": NOW.isoformat(),
+            }
+
+        def list_offline(page, rows=session.offline):
+            if page == 1:
+                return {"data": {"tasks": rows, "page": 1, "page_count": 1, "count": len(rows)}}
+            return {"data": {"tasks": [], "page_count": 1}}
+
+        session.list_offline = list_offline
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"), seen=seen)
+        self.assertTrue(result["ok"])
+        self.assertNotIn("error", result)
+        self.assertNotIn("strm_error", result)
+        self.assertEqual(len(result["moves"]), count)
+        self.assertEqual(session.moves, [])
+        self.assertTrue(all(item["action"] == "leave" and item["reason"] == "没有视频" for item in result["moves"]))
+        self.assertTrue(all("建不了目标目录" not in (item.get("error") or item["reason"]) for item in result["moves"]))
+        self.assertTrue(all(task["status"] == "no_video" and task["reason"] == "没有视频" for task in tasks))
+        self.assertTrue(all(row["status"] == "no_video" for row in seen["hashes"].values()))
+        self.assertNotIn("moved", {row["status"] for row in seen["hashes"].values()})
+        session.listed.clear()
+        again = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"), seen=seen)
+        self.assertTrue(again["ok"])
+        self.assertEqual(again["moves"], [])
+        self.assertEqual(session.moves, [])
+        self.assertEqual(session.listed, [])
+        self.assertTrue(all(task["status"] == "no_video" for task in tasks))
+
+    def test_unconfirmed_missing_video_stays_pending(self):
+        day = "/离线下载/动漫/20261110"
+        leftover = f"{day}/Show000 - 01.mkv"
+        video_pack = f"{day}/Show001 - 02.mkv"
+        video = "Show001 - 02.mkv"
+        mismatch = f"{day}/佐藤同学 - 03.mkv"
+        mismatch_video = "佐藤同学 - 03.mkv"
+        missing = f"{day}/不存在的包"
+        session = _Fake()
+        session.offline = [
+            {"info_hash": f"{index:040x}", "status": 2, "name": name, "file_id": fid}
+            for index, name, fid in (
+                (0, "Show000 - 01.mkv", "pack-0"),
+                (1, video, "pack-1"),
+                (2, "[LoliHouse] 别的剧 - 02.mkv", "other"),
+                (3, mismatch_video, "pack-3"),
+                (4, "不存在的包", "missing"),
+            )
+        ]
+        session.dirs[day] = [
+            Node(leftover, "Show000 - 01.mkv", True, raw={"fid": "pack-0"}),
+            Node(video_pack, video, True, raw={"fid": "pack-1"}),
+            Node(f"{day}/别的目录A", "别的目录A", True),
+            Node(f"{day}/别的目录B", "别的目录B", True),
+            Node(mismatch, mismatch_video, True, raw={"fid": "pack-3"}),
+        ]
+        session.dirs[leftover] = [Node(f"{leftover}/Show000 - 01.ass", "Show000 - 01.ass", False, 100)]
+        session.dirs[video_pack] = [Node(f"{video_pack}/{video}", video, False, 900 * 1024 * 1024)]
+        session.dirs[mismatch] = [
+            Node(f"{mismatch}/{mismatch_video}", mismatch_video, False, 900 * 1024 * 1024),
+            Node(f"{mismatch}/{mismatch_video}/inside.nfo", "inside.nfo", False, 10),
+        ]
+        tasks = [
+            {"infohash": f"{0:040x}", "show": "剧000", "season": 1, "episode": 1, "title": "Show000 - 01", "folder": day, "status": "submitted"},
+            {"infohash": f"{1:040x}", "show": "剧001", "season": 1, "episode": 2, "title": "Show001 - 02", "folder": day, "status": "submitted"},
+            {"infohash": f"{2:040x}", "show": "对不上的剧", "season": 1, "episode": 2, "title": "对不上的剧 - 02", "folder": day, "status": "submitted"},
+            {"infohash": f"{3:040x}", "show": "佐藤同学", "season": 1, "episode": 3, "title": "佐藤同学 - 03", "folder": day, "status": "submitted"},
+            {"infohash": f"{4:040x}", "show": "不存在的包", "season": 1, "episode": 1, "title": "不存在的包", "folder": missing, "status": "submitted"},
+        ]
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertTrue(result["ok"])
+        reasons = [item["reason"] for item in result["moves"]]
+        self.assertEqual(reasons[0], "没有视频")
+        self.assertEqual(result["moves"][1]["action"], "move")
+        self.assertTrue(reasons[2].startswith("找不到这一包"))
+        self.assertEqual(reasons[3], "集数对不上")
+        self.assertEqual(reasons[4], "没有视频")
+        self.assertEqual(tasks[0]["status"], "no_video")
+        self.assertEqual(tasks[1]["status"], "moved")
+        self.assertEqual(tasks[2]["status"], "submitted")
+        self.assertEqual(tasks[3]["status"], "submitted")
+        self.assertEqual(tasks[4]["status"], "submitted")
+        self.assertNotIn("建不了目标目录", reasons[0])
+        self.assertNotIn("strm_error", result)
+        self.assertEqual([item[2] for item in session.moves], [video])
+        session.listed.clear()
+        session.moves.clear()
+        again = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        self.assertEqual([item["task"] for item in again["moves"]], [f"{2:040x}", f"{3:040x}", f"{4:040x}"])
+        self.assertTrue(again["moves"][0]["reason"].startswith("找不到这一包"))
+        self.assertEqual(again["moves"][1]["reason"], "集数对不上")
+        self.assertEqual(again["moves"][2]["reason"], "没有视频")
+        self.assertEqual(session.moves, [])
+        self.assertEqual(tasks[0]["status"], "no_video")
+        self.assertEqual(tasks[2]["status"], "submitted")
+        self.assertEqual(tasks[3]["status"], "submitted")
+        self.assertEqual(tasks[4]["status"], "submitted")
+
+    def test_dry_run_leaves_empty_leftover_pending(self):
+        day = "/离线下载/动漫/20261110"
+        pack = f"{day}/Show000 - 01.mkv"
+        session = _Fake()
+        session.offline = [{"info_hash": HASH, "status": 2, "name": "Show000 - 01.mkv", "file_id": "pack-0"}]
+        session.dirs[day] = [Node(pack, "Show000 - 01.mkv", True, raw={"fid": "pack-0"})]
+        session.dirs[pack] = [Node(f"{pack}/Show000 - 01.ass", "Show000 - 01.ass", False, 100)]
+        tasks = [{
+            "infohash": HASH,
+            "show": "剧000",
+            "season": 1,
+            "episode": 1,
+            "title": "Show000 - 01",
+            "folder": day,
+            "status": "submitted",
+        }]
+        seen = {"hashes": {HASH: {"status": "submitted", "folder": day, "at": NOW.isoformat()}}}
+        preview = run_organize(tasks, session, JobConfig(dry_run=True, library_root="/动漫"), seen=seen)
+        self.assertEqual(preview["moves"][0]["reason"], "没有视频")
+        self.assertEqual(tasks[0]["status"], "submitted")
+        self.assertEqual(seen["hashes"][HASH]["status"], "submitted")
+        self.assertEqual(session.moves, [])
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"), seen=seen)
+        self.assertEqual(result["moves"][0]["reason"], "没有视频")
+        self.assertEqual(tasks[0]["status"], "no_video")
+        self.assertEqual(seen["hashes"][HASH]["status"], "no_video")
+
+    def test_no_video_does_not_change_the_three_day_resubmit(self):
+        show = parse_watchlist("佐藤同学")[0]
+        torrent = Torrent("佐藤同学 - 03 [1080p][简体]", HASH, f"magnet:?xt=urn:btih:{HASH}", 900 * 1024 * 1024, NOW)
+        recent = {
+            "hashes": {"b" * 40: {"at": NOW.isoformat(), "status": "no_video"}},
+            "episodes": {"佐藤同学|1|3": "b" * 40},
+        }
+        blocked = run_daily([show], _Fake(), lambda _show: [torrent], recent, NOW, JobConfig(dry_run=False))
+        self.assertEqual(blocked["submitted"], [])
+        stale = {
+            "hashes": {"b" * 40: {"at": (NOW - timedelta(days=4)).isoformat(), "status": "no_video"}},
+            "episodes": {"佐藤同学|1|3": "b" * 40},
+        }
+        result = run_daily([show], _Fake(), lambda _show: [torrent], stale, NOW, JobConfig(dry_run=False))
+        self.assertEqual(len(result["submitted"]), 1)
+
     def test_offline_list_timeout_logs_and_the_next_run_still_moves(self):
         from anime115 import anime_jobs
 
