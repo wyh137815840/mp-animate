@@ -12,7 +12,7 @@ from typing import Callable
 from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
 
-from .anime_names import Show, _has_episode_range, parse_episode, title_matches
+from .anime_names import Show, _EPISODE_RANGE, _has_episode_range, parse_episode, title_matches
 
 
 _BATCH_KEYWORDS = re.compile(
@@ -21,12 +21,8 @@ _BATCH_KEYWORDS = re.compile(
     r"|\d+\s*[集話话]全",
     re.IGNORECASE,
 )
-# 范围包：01-12、03~04。挡住日期和 x264-10bit 这类前后带字母数字的写法。
-_BATCH_RANGE = re.compile(
-    r"(?<![\d.\-SEse])\d{1,3}\s*[-–~]\s*\d{1,3}(?:\s*v\d+)?(?![0-9A-Za-z])",
-    re.IGNORECASE,
-)
-_BATCH = re.compile(rf"(?:{_BATCH_KEYWORDS.pattern})|(?:{_BATCH_RANGE.pattern})", re.IGNORECASE)
+# 范围包：01-12、03~04。复用 anime_names 的范围正则，和 parse_episode 的判断保持一致。
+_BATCH = re.compile(rf"(?:{_BATCH_KEYWORDS.pattern})|(?:{_EPISODE_RANGE.pattern})", re.IGNORECASE)
 _RAW = re.compile(r"生肉|\bRAW\b", re.IGNORECASE)
 _RES_MARKS = (
     (2160, re.compile(r"(?<!\d)2160(?!\d)|(?<![a-z0-9])4k(?![a-z0-9])|\bUHD\b", re.IGNORECASE)),

@@ -105,6 +105,9 @@ class EpisodeRangeTest(unittest.TestCase):
         self.assertEqual(parse_episode("Show - 05.mkv"), (1, 5))
         self.assertEqual(parse_episode("Show 第2期 - 05 [1080p].mkv"), (2, 5))
         self.assertEqual(parse_episode("Show S2 - 05.mkv"), (2, 5))
+        # 数字属于剧名编号时不是范围，单集照常解析。
+        self.assertEqual(parse_episode("Show001 - 02"), (1, 2))
+        self.assertEqual(parse_episode("Show 86 - 01 [1080p]"), (1, 1))
 
 
 class BatchRangeTest(unittest.TestCase):

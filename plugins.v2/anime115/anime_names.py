@@ -170,6 +170,8 @@ _EPISODE_RANGE = re.compile(
     re.IGNORECASE,
 )
 _SEASON_RANGE_PREFIX = re.compile(r"(?:season|第)\s*$", re.IGNORECASE)
+# 数字直接贴在单词后面时，只有这些集数标记才算范围（EP01-12），否则多半是剧名编号（Show001 - 02）。
+_EPISODE_RANGE_MARKER = re.compile(r"(?:episode|ep|e|vol|volume|#)\s*\.?\s*$", re.IGNORECASE)
 _VIDEO_EXT = r"\.(?:mkv|mp4|avi|ts|m2ts|flv|wmv|mov|webm|rmvb|m4v|iso|ogm)\b"
 # 发布标题常以 .mkv 结尾，集数后面跟着扩展名也要认。
 _DASHED_EPISODE = re.compile(
@@ -213,10 +215,15 @@ def parse_episode(title: str) -> tuple[int, int] | None:
 def _has_episode_range(text: str) -> bool:
     """01-12、03~04 这类整包范围。S2 - 05、Season 2 - 05 里的季号不算范围。"""
     for matched in _EPISODE_RANGE.finditer(text):
-        if _SEASON_RANGE_PREFIX.search(text[:matched.start(1)]):
+        prefix = text[:matched.start(1)]
+        if _SEASON_RANGE_PREFIX.search(prefix):
+            continue
+        # Show001 - 02、x264-10 这类数字属于剧名/编码，不是集数范围；
+        # EP01-12 这种明确带集数前缀的写法仍按范围处理。
+        if prefix and prefix[-1].isalpha() and not _EPISODE_RANGE_MARKER.search(prefix):
             continue
         first, second = int(matched.group(1)), int(matched.group(2))
-        # 集数从 1 开始；86 - 01 这类数字剧名不是范围。
+        # 集数从 1 开始，且范围必须升序；86 - 01 是单集标题。
         if 0 < first < second:
             return True
     return False
