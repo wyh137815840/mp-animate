@@ -41,6 +41,7 @@ _FORM_NOTE = (
     "外网播放地址留给公网 Emby 反代。两个地址都不能写 127.0.0.1。115 直链仍由 115网盘STRM助手签发。"
     "每日默认从 MoviePilot 订阅里只挑动漫去花园搜。电视剧和电影不搜。离线提交走已登录的存储，不使用 P115Client。"
     "打开「完成后刷新 Emby」时，整理或 strm 真正写盘后只刷新「Emby 媒体库名」这一库，找不到库就不刷，预览不刷。"
+    "「库里已有同集不提交」默认开：选片时先看库根/剧名/季目录里有没有这一集，已有就跳过，不重复下载。"
     "离线整理留空则每 30 分钟自动跑，不用手点。每日和摊平留空则不定时。"
     "摊平即使关了预览，也要另开「摊平允许落盘」才会移动。"
 )
@@ -52,7 +53,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.23"
+    plugin_version = "1.0.24"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -89,6 +90,7 @@ class Anime115(_PluginBase):
     _cookie = ""
     _refresh_emby = False
     _emby_library = "动漫"
+    _skip_owned = True
     _strm_root = ""
     _play_base = PLAY_BASE
     _play_base_lan = PLAY_BASE_LAN
@@ -119,6 +121,7 @@ class Anime115(_PluginBase):
         self._cookie = usable_cookie(str(config.get("cookie") or ""))
         self._refresh_emby = bool(config.get("refresh_emby"))
         self._emby_library = str(config.get("emby_library") or "动漫").strip() or "动漫"
+        self._skip_owned = bool(config.get("skip_owned", True))
         self._strm_root = str(config.get("strm_root") or "").strip()
         self._play_base = str(config.get("play_base") or PLAY_BASE).strip() or PLAY_BASE
         self._play_base_lan = str(config.get("play_base_lan") or PLAY_BASE_LAN).strip() or PLAY_BASE_LAN
@@ -252,6 +255,7 @@ class Anime115(_PluginBase):
                             _switch(3, "flatten_apply", "摊平允许落盘"),
                             _switch(3, "notify", "发送通知"),
                             _switch(3, "refresh_emby", "完成后刷新 Emby"),
+                            _switch(3, "skip_owned", "库里已有同集不提交"),
                             _switch(3, "require_sub", "不要生肉"),
                             _switch(3, "allow_batch", "允许合集"),
                             _field(4, "daily_cron", "每日补磁力", "15 10 * * *，留空则不定时"),
@@ -293,6 +297,7 @@ class Anime115(_PluginBase):
             "onlyonce": False,
             "notify": False,
             "refresh_emby": False,
+            "skip_owned": True,
             "dry_run": True,
             "flatten_apply": False,
             "require_sub": True,
@@ -697,6 +702,7 @@ class Anime115(_PluginBase):
             play_base_lan=self._play_base_lan,
             strm_for=self._strm_for,
             public_hosts=self._public_hosts,
+            skip_owned=self._skip_owned,
         )
 
     def _report(self, patch: dict) -> None:

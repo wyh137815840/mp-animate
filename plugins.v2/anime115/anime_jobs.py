@@ -203,6 +203,7 @@ class JobConfig:
     play_base_lan: str = ""
     strm_for: str = ""
     public_hosts: str = ""
+    skip_owned: bool = True
 
 
 def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None) -> dict:
@@ -212,13 +213,27 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
         return {"ok": False, "error": "未配置追更", "picks": [], "dry_run": config.dry_run}
     inbox = _dated_inbox(config, now)
     picks, notes = select_shows(shows, entries_of, config.search, now)
+    owned = _OwnedIndex(session, config) if config.skip_owned else None
     chosen = []
+    checked = 0
+    scan_limit = max(config.max_submit_per_run * 3, 5)
     for pick in picks:
+        if len(chosen) >= config.max_submit_per_run or checked >= scan_limit:
+            break
         if _episode_blocked(seen, pick, now):
             notes.append({"show": pick.show, "title": pick.torrent.title, "reason": "已经提交过"})
             continue
+        if owned is not None:
+            checked += 1
+            try:
+                in_library = owned.has(pick)
+            except Exception as exc:
+                _job_log(f"动漫 115 查库里已有集数失败，按没有处理：{exc}", "warning")
+                in_library = None
+            if in_library is True:
+                notes.append({"show": pick.show, "title": pick.torrent.title, "reason": "库里已有这一集"})
+                continue
         chosen.append(pick)
-    chosen = chosen[: config.max_submit_per_run]
     if _cancelled(session):
         return _daily_stopped(config, inbox, chosen, notes, [])
     submitted = []
@@ -981,6 +996,73 @@ def _show_folder(session, library: str, show: str) -> tuple[str, str]:
         children = []
     names = [item.name for item in children if getattr(item, "is_dir", False)]
     return resolve_show_folder(names, show)
+
+
+class _OwnedIndex:
+    """查库根里是不是已经有这一集。只读；出错或认不准时放行（返回 None），不挡提交。"""
+
+    def __init__(self, session, config):
+        self.session = session
+        self.config = config
+        self.library = (
+            strip_mount_prefix(config.library_root, config.mount_prefix) if config.library_root else ""
+        )
+        self._folders: list[str] | None = None
+        self._episodes: dict[tuple[str, int], set[int] | None] = {}
+
+    def has(self, pick) -> bool | None:
+        """True=库里已有；False=没有；None=查不了（没有库根、目录不全、接口失败）。"""
+        try:
+            return self._has(pick)
+        except Exception:
+            return None
+
+    def _has(self, pick) -> bool | None:
+        if not self.library or self.library == "/":
+            return None
+        if self._folders is None:
+            items = self.session.list_dir(self.library) or []
+            self._folders = [item.name for item in items if getattr(item, "is_dir", False)]
+        if not self._folders:
+            return None
+        folder, why = resolve_show_folder(self._folders, getattr(pick, "show", "") or "")
+        if why or not folder:
+            return None
+        season = int(getattr(pick, "season", 0) or 0)
+        if season <= 0:
+            return None
+        key = (folder, season)
+        if key not in self._episodes:
+            self._episodes[key] = self._load_episodes(folder, season)
+        episodes = self._episodes[key]
+        if episodes is None:
+            return None
+        return int(getattr(pick, "episode", 0) or 0) in episodes
+
+    def _load_episodes(self, folder: str, season: int) -> set[int] | None:
+        show_dir = join_path(self.library, folder)
+        try:
+            children = self.session.list_dir(show_dir) or []
+        except Exception:
+            return None
+        season_dirs = [
+            item
+            for item in children
+            if getattr(item, "is_dir", False) and _season_dir_number(item.name) == season
+        ]
+        if not season_dirs:
+            return set()
+        episodes: set[int] = set()
+        for season_dir in season_dirs:
+            try:
+                files = self.session.list_dir(season_dir.path) or []
+            except Exception:
+                continue
+            for item in files:
+                parsed = parse_episode(item.name)
+                if parsed is not None and parsed[0] == season:
+                    episodes.add(parsed[1])
+        return episodes
 
 
 def _is_video_file(item: Node) -> bool:

@@ -162,9 +162,9 @@ class RefreshResultTest(unittest.TestCase):
 class VersionTest(unittest.TestCase):
     def test_package_and_history(self):
         package = json.loads((Path(__file__).resolve().parents[1] / "package.v2.json").read_text(encoding="utf-8"))
-        self.assertEqual(package["Anime115"]["version"], "1.0.23")
-        self.assertIn("Emby", package["Anime115"]["history"]["v1.0.23"])
-        self.assertEqual(_PLUGIN.Anime115.plugin_version, "1.0.23")
+        self.assertEqual(package["Anime115"]["version"], "1.0.24")
+        self.assertIn("库里已有", package["Anime115"]["history"]["v1.0.24"])
+        self.assertEqual(_PLUGIN.Anime115.plugin_version, "1.0.24")
 
 
 if __name__ == "__main__":
