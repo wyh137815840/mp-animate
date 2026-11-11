@@ -114,9 +114,10 @@ class StrmTemplateTest(unittest.TestCase):
         with self.assertRaises(PlayUrlError):
             strm_template(PLAY_BASE, PLAY_BASE, "lan")
 
-    def test_package_version_is_1_0_24(self):
+    def test_package_version_is_1_0_25(self):
         package = json.loads((Path(__file__).resolve().parents[1] / "package.v2.json").read_text(encoding="utf-8"))
-        self.assertEqual(package["Anime115"]["version"], "1.0.24")
+        self.assertEqual(package["Anime115"]["version"], "1.0.25")
+        self.assertIn("并集", package["Anime115"]["history"]["v1.0.25"])
         self.assertIn("库里已有", package["Anime115"]["history"]["v1.0.24"])
         self.assertIn("Emby", package["Anime115"]["history"]["v1.0.23"])
         self.assertIn("没有视频", package["Anime115"]["history"]["v1.0.22"])
@@ -124,7 +125,7 @@ class StrmTemplateTest(unittest.TestCase):
         self.assertIn("fs_mkdir", package["Anime115"]["history"]["v1.0.20"])
         self.assertIn("每 30 分钟", package["Anime115"]["history"]["v1.0.19"])
         text = (_ROOT / "__init__.py").read_text(encoding="utf-8")
-        self.assertIn('plugin_version = "1.0.24"', text)
+        self.assertIn('plugin_version = "1.0.25"', text)
         self.assertIn("内网播放地址", text)
         self.assertIn("外网播放地址", text)
 

@@ -116,6 +116,32 @@ class OwnedIndexTest(unittest.TestCase):
         self.assertIs(owned.has(pick), False)
 
 
+class DuplicateFolderTest(unittest.TestCase):
+    def test_year_variant_folder_is_also_checked(self):
+        session = FakeSession({
+            "/动漫": [
+                _dir("/动漫/神之塔", "神之塔"),
+                _dir("/动漫/神之塔 -Tower of God (2020)", "神之塔 -Tower of God (2020)"),
+            ],
+            "/动漫/神之塔": [_dir("/动漫/神之塔/Season 02", "Season 02")],
+            "/动漫/神之塔/Season 02": [
+                _file("/动漫/神之塔/Season 02/Tower.of.God.S02E26.mkv", "Tower.of.God.S02E26.mkv"),
+            ],
+            "/动漫/神之塔 -Tower of God (2020)": [
+                _dir("/动漫/神之塔 -Tower of God (2020)/Season 02", "Season 02")
+            ],
+            "/动漫/神之塔 -Tower of God (2020)/Season 02": [
+                _file("/动漫/神之塔 -Tower of God (2020)/Season 02/S02E11 - x.mkv", "S02E11 - x.mkv"),
+                _file("/动漫/神之塔 -Tower of God (2020)/Season 02/S02E22 - x.mkv", "S02E22 - x.mkv"),
+            ],
+        })
+        owned = _OwnedIndex(session, JobConfig(library_root="/动漫"))
+        self.assertIs(owned.has(types.SimpleNamespace(show="神之塔", season=2, episode=11)), True)
+        self.assertIs(owned.has(types.SimpleNamespace(show="神之塔", season=2, episode=22)), True)
+        self.assertIs(owned.has(types.SimpleNamespace(show="神之塔", season=2, episode=26)), True)
+        self.assertIs(owned.has(types.SimpleNamespace(show="神之塔", season=2, episode=27)), False)
+
+
 class RunDailySkipOwnedTest(unittest.TestCase):
     def _config(self, **kwargs):
         base = dict(

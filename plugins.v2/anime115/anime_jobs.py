@@ -1025,19 +1025,48 @@ class _OwnedIndex:
             self._folders = [item.name for item in items if getattr(item, "is_dir", False)]
         if not self._folders:
             return None
-        folder, why = resolve_show_folder(self._folders, getattr(pick, "show", "") or "")
-        if why or not folder:
-            return None
+        folders = self._candidate_folders(getattr(pick, "show", "") or "")
+        if not folders:
+            return False
         season = int(getattr(pick, "season", 0) or 0)
-        if season <= 0:
+        episode = int(getattr(pick, "episode", 0) or 0)
+        if season <= 0 or episode <= 0:
             return None
-        key = (folder, season)
-        if key not in self._episodes:
-            self._episodes[key] = self._load_episodes(folder, season)
-        episodes = self._episodes[key]
-        if episodes is None:
-            return None
-        return int(getattr(pick, "episode", 0) or 0) in episodes
+        unknown = False
+        for folder in folders:
+            key = (folder, season)
+            if key not in self._episodes:
+                self._episodes[key] = self._load_episodes(folder, season)
+            episodes = self._episodes[key]
+            if episodes is None:
+                unknown = True
+                continue
+            if episode in episodes:
+                return True
+        return None if unknown else False
+
+    def _candidate_folders(self, show: str) -> list[str]:
+        """同名目录和「剧名 (年份)」目录都算。库里有重复目录时取并集，避免只查空目录就放行。"""
+        wanted = safe_dir_name(show or "") or "unknown"
+        raw = (show or "").strip()
+        found = []
+        for name in self._folders or []:
+            if name == wanted:
+                found.append(name)
+                continue
+            matched = _SHOW_YEAR.match(name.strip())
+            if not matched:
+                continue
+            stem = matched.group(1).strip()
+            if safe_dir_name(stem) == wanted or stem == raw:
+                found.append(name)
+                continue
+            # 「神之塔 -Tower of God (2020)」这种「剧名 + 副标题 (年份)」也算同一部。
+            folded_stem = _fold_name(stem)
+            folded_wanted = _fold_name(wanted or raw)
+            if folded_wanted and folded_stem.startswith(folded_wanted):
+                found.append(name)
+        return found
 
     def _load_episodes(self, folder: str, season: int) -> set[int] | None:
         show_dir = join_path(self.library, folder)
