@@ -157,47 +157,98 @@ def _kept(ch: str) -> bool:
     )
 
 
+# 季标记只从明确写法里取，避免把分辨率、版本号、码率当成季。
+_SEASON_EPISODE = re.compile(r"S(\d{1,2})\s*E(\d{1,3})", re.IGNORECASE)
+_SEASON_CN = re.compile(r"第\s*(\d{1,2}|[一二三四五六七八九十])\s*[季期]")
+_SEASON_CN_PERIOD = re.compile(r"(\d{1,2}|[一二三四五六七八九十])\s*期")
+_SEASON_EN = re.compile(r"season\s*(\d{1,2})|(\d{1,2})\s*(?:st|nd|rd|th)\s*season", re.IGNORECASE)
+_S_SEASON_EPISODE = re.compile(r"(?<![0-9A-Za-z])S(\d{1,2})\s*[-–~]\s*(\d{1,3})(?![0-9A-Za-z])", re.IGNORECASE)
+# 整包范围：01-12、03~04。S/E 前缀（S2 - 05、S01E03）和 Season 2 - 05 里的季号不算。
+# 前后挡住数字和点，避免把日期（2024-2025、2024.01.15）和 5.1 这类数字当成范围。
+_EPISODE_RANGE = re.compile(
+    r"(?<![\d.\-SEse])(\d{1,3})\s*[-–~]\s*(\d{1,3})(?:\s*v\d+)?(?![0-9A-Za-z])",
+    re.IGNORECASE,
+)
+_SEASON_RANGE_PREFIX = re.compile(r"(?:season|第)\s*$", re.IGNORECASE)
+_VIDEO_EXT = r"\.(?:mkv|mp4|avi|ts|m2ts|flv|wmv|mov|webm|rmvb|m4v|iso|ogm)\b"
+# 发布标题常以 .mkv 结尾，集数后面跟着扩展名也要认。
+_DASHED_EPISODE = re.compile(
+    rf"[-–]\s*(\d{{1,3}})(?:\s*v\d+)?(?=\s|\[|【|$|{_VIDEO_EXT})",
+    re.IGNORECASE,
+)
+_BRACKET_EPISODE = re.compile(r"\[(\d{1,3})(?:\s*v\d+)?\]", re.IGNORECASE)
+_SPOKEN_EPISODE = re.compile(r"第\s*(\d{1,3})\s*[话話集]")
+
+
 def parse_episode(title: str) -> tuple[int, int] | None:
-    """从发布标题里取季和集。对不上、或有两套不同集数时返回空。"""
+    """从发布标题里取季和集。对不上、有两套不同集数或季、或是整包范围时返回空。"""
     text = title or ""
     if re.search(r"OVA|特典|剧场版|劇場版|\bSP\b", text, re.IGNORECASE):
         return None
-    seasons = set()
+    if _has_episode_range(text):
+        return None
     episodes = set()
-    season_episode = re.search(r"S(\d{1,2})\s*E(\d{1,3})", text, re.IGNORECASE)
-    if season_episode:
-        seasons.add(int(season_episode.group(1)))
-        episodes.add(int(season_episode.group(2)))
-    for spoken in re.finditer(r"第\s*(\d{1,3})\s*[话話集]", text):
+    for matched in _SEASON_EPISODE.finditer(text):
+        episodes.add(int(matched.group(2)))
+    for matched in _S_SEASON_EPISODE.finditer(text):
+        episodes.add(int(matched.group(2)))
+    for spoken in _SPOKEN_EPISODE.finditer(text):
         episodes.add(int(spoken.group(1)))
-    for dashed in re.finditer(r"[-–]\s*(\d{1,3})(?:\s*v\d+)?(?=\s|\[|【|$)", text, re.IGNORECASE):
+    for dashed in _DASHED_EPISODE.finditer(text):
         episodes.add(int(dashed.group(1)))
-    for bracket in re.finditer(r"\[(\d{1,3})(?:\s*v\d+)?\]", text, re.IGNORECASE):
+    for bracket in _BRACKET_EPISODE.finditer(text):
         episodes.add(int(bracket.group(1)))
     if len(episodes) != 1:
         return None
+    seasons = _seasons_in_text(text)
     if len(seasons) > 1:
         return None
-    if seasons:
-        season = next(iter(seasons))
-    else:
-        season = _season_from_words(text)
+    season = next(iter(seasons), 1)
     episode = next(iter(episodes))
     if episode <= 0 or season <= 0:
         return None
     return season, episode
 
 
+def _has_episode_range(text: str) -> bool:
+    """01-12、03~04 这类整包范围。S2 - 05、Season 2 - 05 里的季号不算范围。"""
+    for matched in _EPISODE_RANGE.finditer(text):
+        if _SEASON_RANGE_PREFIX.search(text[:matched.start(1)]):
+            continue
+        first, second = int(matched.group(1)), int(matched.group(2))
+        # 集数从 1 开始；86 - 01 这类数字剧名不是范围。
+        if 0 < first < second:
+            return True
+    return False
+
+
+def _seasons_in_text(text: str) -> set[int]:
+    """标题里出现的季。SxxExx、第N季/期、N期、Season N、Nth Season、S2 - 05。"""
+    found = set()
+    for matched in _SEASON_EPISODE.finditer(text):
+        found.add(int(matched.group(1)))
+    for matched in _SEASON_CN.finditer(text):
+        found.add(_season_number(matched.group(1)))
+    for matched in _SEASON_CN_PERIOD.finditer(text):
+        found.add(_season_number(matched.group(1)))
+    for matched in _SEASON_EN.finditer(text):
+        found.add(int(matched.group(1) or matched.group(2)))
+    for matched in _S_SEASON_EPISODE.finditer(text):
+        found.add(int(matched.group(1)))
+    found.discard(0)
+    return found
+
+
+def _season_number(token: str) -> int:
+    if token.isdigit():
+        return int(token)
+    return _SEASON_WORD.get(token, 1)
+
+
 def _season_from_words(text: str) -> int:
-    numbered = re.search(r"第\s*([一二三四五六七八九十]|\d{1,2})\s*季", text)
-    if numbered:
-        token = numbered.group(1)
-        if token.isdigit():
-            return int(token)
-        return _SEASON_WORD.get(token, 1)
-    if re.search(r"2nd\s*season", text, re.IGNORECASE):
-        return 2
-    return 1
+    """没有明确季标记时算第 1 季。"""
+    seasons = _seasons_in_text(text)
+    return min(seasons) if seasons else 1
 
 
 def safe_dir_name(name: str) -> str:

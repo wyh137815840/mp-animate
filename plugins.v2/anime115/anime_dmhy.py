@@ -12,10 +12,21 @@ from typing import Callable
 from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
 
-from .anime_names import Show, parse_episode, title_matches
+from .anime_names import Show, _has_episode_range, parse_episode, title_matches
 
 
-_BATCH = re.compile(r"合集|全集|整季|batch|\bFin\b|BDrip|BDRip", re.IGNORECASE)
+_BATCH_KEYWORDS = re.compile(
+    r"合集|全集|整季|batch|\bFin\b|BDrip|BDRip"
+    r"|全\s*\d+\s*[集話话]"
+    r"|\d+\s*[集話话]全",
+    re.IGNORECASE,
+)
+# 范围包：01-12、03~04。挡住日期和 x264-10bit 这类前后带字母数字的写法。
+_BATCH_RANGE = re.compile(
+    r"(?<![\d.\-SEse])\d{1,3}\s*[-–~]\s*\d{1,3}(?:\s*v\d+)?(?![0-9A-Za-z])",
+    re.IGNORECASE,
+)
+_BATCH = re.compile(rf"(?:{_BATCH_KEYWORDS.pattern})|(?:{_BATCH_RANGE.pattern})", re.IGNORECASE)
 _RAW = re.compile(r"生肉|\bRAW\b", re.IGNORECASE)
 _RES_MARKS = (
     (2160, re.compile(r"(?<!\d)2160(?!\d)|(?<![a-z0-9])4k(?![a-z0-9])|\bUHD\b", re.IGNORECASE)),
@@ -252,7 +263,7 @@ def score_torrent(
         return None, "4K"
     if height is not None and height < floor:
         return None, "分辨率不足"
-    if not options.allow_batch and _BATCH.search(title):
+    if not options.allow_batch and _is_batch(title):
         return None, "合集"
     if torrent.published is not None and _too_old(torrent.published, now, options.lookback_hours):
         return None, "超出回溯时间"
@@ -274,6 +285,13 @@ def score_torrent(
     elif re.search(r"繁体|CHT|BIG5", title, re.IGNORECASE):
         score += 5
     return score, ""
+
+
+def _is_batch(title: str) -> bool:
+    """合集关键词或升序集数范围。_BATCH 只做粗筛，范围要比大小，86 - 01 这种单集标题不能丢。"""
+    if not _BATCH.search(title):
+        return False
+    return bool(_BATCH_KEYWORDS.search(title)) or _has_episode_range(title)
 
 
 def _floor_height(resolution: str) -> int:

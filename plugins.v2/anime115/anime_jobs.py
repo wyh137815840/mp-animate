@@ -18,7 +18,7 @@ from .anime_strm import commit_strm, pickcode_of, strm_relative
 
 SUB_EXTS = {".ass", ".srt", ".ssa", ".sup", ".sub", ".idx", ".vtt"}
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".ts", ".m2ts"}
-_SHOW_YEAR = re.compile(r"^(.+?) [(（](\d{4})[)）]$")
+_SHOW_YEAR = re.compile(r"^(.+?)\s*[(（](\d{4})[)）](?:\s*\{tmdb-\d+\})?$")
 # 开放平台和 p115client 都可能一直不返回。到点就结束这一轮，避免整理把后面的周期全部挡住。
 _OFFLINE_CALL_TIMEOUT = 45
 
@@ -730,15 +730,45 @@ def _quota_left(payload) -> int | None:
     return None
 
 
+# 115 开放平台的成功业务码：0 成功，20004 表示任务已在（重复提交也算接单）。
+# 与宿主 U115_DEFAULT_ACCEPTED_CODES 保持一致。
+_OFFLINE_ACCEPTED_CODES = (0, 20004)
+
+
+def _task_accepted(task) -> bool:
+    """单条离线任务的结果。state 明确 false、或业务码不是 0/20004 都算没接单。"""
+    if not isinstance(task, dict):
+        # 结构未知时保守放行，不让一次格式变化把正常提交挡掉。
+        return True
+    if task.get("state") in (False, 0, "false"):
+        return False
+    number = _plain_int(task.get("code"))
+    if number is not None:
+        return number in _OFFLINE_ACCEPTED_CODES
+    return True
+
+
+def _data_accepted(data) -> bool:
+    """add_task_urls 的 data 是逐任务结果，可能是列表或单个对象，没有就维持现状。"""
+    if isinstance(data, list):
+        if not data:
+            return True
+        return all(_task_accepted(item) for item in data)
+    if isinstance(data, dict):
+        return _task_accepted(data)
+    return True
+
+
 def _accepted(payload) -> bool:
     if not isinstance(payload, dict):
         return False
     if payload.get("state") in (False, 0, "false"):
         return False
-    if payload.get("state") in (True, 1, "true"):
-        return True
-    code = payload.get("code")
-    return code in (0, None) and "data" in payload
+    if payload.get("state") not in (True, 1, "true"):
+        code = payload.get("code")
+        if not (code in (0, None) and "data" in payload):
+            return False
+    return _data_accepted(payload.get("data"))
 
 
 def _landed_in_cloud_download(payload) -> bool:
@@ -783,7 +813,14 @@ def _offline_index(session) -> tuple[dict[str, dict], bool]:
             if page == 1:
                 raise
             return _index_done(found, False)
-        rows = [item for item in _task_rows(payload) if isinstance(item, dict)]
+        if payload is None or not isinstance(payload, (dict, list)):
+            # 接口失败时宿主返回 None，这里不能当成「列表已翻完」：
+            # 没见到的任务要按没看完处理，继续 pending，免得把还在下载的搬走。
+            return _index_done(found, False)
+        if isinstance(payload, list):
+            rows = [item for item in payload if isinstance(item, dict)]
+        else:
+            rows = [item for item in _task_rows(payload) if isinstance(item, dict)]
         if not rows:
             return _index_done(found, True)
         added = 0
@@ -1347,6 +1384,9 @@ def _apply_strm(decision: dict, config: JobConfig, write: bool, cancel=None) -> 
         return
     decision["strm_relative"] = relative
     decision["strm_url"] = url
+    if _local_episode_exists(root, relative, season, episode):
+        decision["strm_skipped"] = "季目录已有同集视频"
+        return
     if not write:
         decision["strm"] = str(Path(root) / relative)
         return
@@ -1354,6 +1394,22 @@ def _apply_strm(decision: dict, config: JobConfig, write: bool, cancel=None) -> 
         decision["strm"] = commit_strm(root, relative, url, cancel=cancel)
     except OSError as exc:
         decision["strm_error"] = str(exc)
+
+
+def _local_episode_exists(root: str, relative: str, season: int, episode: int) -> bool:
+    """目标季目录里已经有同集视频时不再叠一层 strm。本地目录读不到就当没有。"""
+    try:
+        folder = Path(root) / Path(relative).parent
+        children = list(folder.iterdir())
+    except OSError:
+        return False
+    for child in children:
+        if child.suffix.lower() not in VIDEO_EXTS:
+            continue
+        parsed = parse_episode(child.name)
+        if parsed is not None and parsed == (season, episode):
+            return True
+    return False
 
 
 def _library_videos(session, library: str, limit: str) -> list[dict]:

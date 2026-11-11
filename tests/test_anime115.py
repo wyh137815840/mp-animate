@@ -1413,7 +1413,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.22")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.23")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):
@@ -1472,7 +1472,7 @@ class ImportTest(unittest.TestCase):
         self.assertIn("_mp_session", daily)
         self.assertNotIn("P115Client", daily)
         self.assertNotIn("CookieSession", daily)
-        for key in ("javbus_host", "proxy", "rename_folder", "overwrite", "refresh_emby", "emby_library"):
+        for key in ("javbus_host", "proxy", "rename_folder", "overwrite"):
             self.assertNotIn(key, defaults)
         self.assertIs(plugin.parse_rss, sys.modules["app.plugins.anime115.anime_dmhy"].parse_rss)
 

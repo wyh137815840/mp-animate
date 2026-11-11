@@ -16,6 +16,7 @@ from app.log import logger
 from app.plugins import _PluginBase
 
 from .anime_config import PLAY_BASE, PLAY_BASE_LAN, offline_directory, organize_schedule, scheduled_jobs, usable_cookie
+from .anime_emby import refresh_library
 from .anime_playurl import (
     DEFAULT_LAN_CIDRS,
     DEFAULT_PUBLIC_HOSTS,
@@ -39,6 +40,7 @@ _FORM_NOTE = (
     "已经在库里的文件用 job=strm 重新生成 strm，不移动。strm 默认写内网播放地址，局域网不再走外网域名。"
     "外网播放地址留给公网 Emby 反代。两个地址都不能写 127.0.0.1。115 直链仍由 115网盘STRM助手签发。"
     "每日默认从 MoviePilot 订阅里只挑动漫去花园搜。电视剧和电影不搜。离线提交走已登录的存储，不使用 P115Client。"
+    "打开「完成后刷新 Emby」时，整理或 strm 真正写盘后只刷新「Emby 媒体库名」这一库，找不到库就不刷，预览不刷。"
     "离线整理留空则每 30 分钟自动跑，不用手点。每日和摊平留空则不定时。"
     "摊平即使关了预览，也要另开「摊平允许落盘」才会移动。"
 )
@@ -50,7 +52,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.22"
+    plugin_version = "1.0.23"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -85,6 +87,8 @@ class Anime115(_PluginBase):
     _flatten_max_moves = 30
     _tmdb_api_key = ""
     _cookie = ""
+    _refresh_emby = False
+    _emby_library = "动漫"
     _strm_root = ""
     _play_base = PLAY_BASE
     _play_base_lan = PLAY_BASE_LAN
@@ -113,6 +117,8 @@ class Anime115(_PluginBase):
         self._flatten_cron = str(config.get("flatten_cron") or "").strip()
         self._offline_root = offline_directory(config)
         self._cookie = usable_cookie(str(config.get("cookie") or ""))
+        self._refresh_emby = bool(config.get("refresh_emby"))
+        self._emby_library = str(config.get("emby_library") or "动漫").strip() or "动漫"
         self._strm_root = str(config.get("strm_root") or "").strip()
         self._play_base = str(config.get("play_base") or PLAY_BASE).strip() or PLAY_BASE
         self._play_base_lan = str(config.get("play_base_lan") or PLAY_BASE_LAN).strip() or PLAY_BASE_LAN
@@ -245,6 +251,7 @@ class Anime115(_PluginBase):
                             _switch(3, "dry_run", "只预览，不提交不移动"),
                             _switch(3, "flatten_apply", "摊平允许落盘"),
                             _switch(3, "notify", "发送通知"),
+                            _switch(3, "refresh_emby", "完成后刷新 Emby"),
                             _switch(3, "require_sub", "不要生肉"),
                             _switch(3, "allow_batch", "允许合集"),
                             _field(4, "daily_cron", "每日补磁力", "15 10 * * *，留空则不定时"),
@@ -258,6 +265,7 @@ class Anime115(_PluginBase):
                             ),
                             _field(12, "offline_dir", "离线下载目录", "默认 /离线下载/动漫，日期子目录自动加"),
                             _field(6, "strm_root", "strm 目录", "/media/动漫，这台 Emby 媒体库正在扫描的路径"),
+                            _field(6, "emby_library", "Emby 媒体库名", "动漫"),
                             _field(12, "play_base_lan", "内网播放地址", "http://192.168.1.9:3000 或 http://192.168.1.10:8787/redirect?pickcode={pickcode}"),
                             _field(12, "play_base", "外网播放地址", PLAY_BASE),
                             _field(6, "strm_for", "strm 使用的地址", "lan、public 或 redirect"),
@@ -284,6 +292,7 @@ class Anime115(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "notify": False,
+            "refresh_emby": False,
             "dry_run": True,
             "flatten_apply": False,
             "require_sub": True,
@@ -295,6 +304,7 @@ class Anime115(_PluginBase):
             "cookie": "",
             "offline_dir": "/离线下载/动漫",
             "strm_root": "",
+            "emby_library": "动漫",
             "play_base": PLAY_BASE,
             "play_base_lan": PLAY_BASE_LAN,
             "strm_for": "lan",
@@ -350,12 +360,12 @@ class Anime115(_PluginBase):
             cancel.set()
             logger.info("动漫 115 停止：已要求正在运行的任务结束")
 
-    def api_run(self, job: str = "daily", root: str = "", **kwargs) -> dict:
+    def api_run(self, job: str = "daily", root: str = "") -> dict:
         """按 job 启动任务。strm 的 root 只补那一部剧。"""
         if not self._enabled:
             return {"ok": False, "error": "插件未启用"}
-        name = str(kwargs.get("job") or job or "daily")
-        limit = str(kwargs.get("root") or root or "").strip()
+        name = str(job or "daily")
+        limit = str(root or "").strip()
         if name == "strm":
             threading.Thread(target=lambda: self.run_strm(limit), name="anime115-strm", daemon=True).start()
             return {"ok": True, "message": "已开始", "job": name}
@@ -620,6 +630,13 @@ class Anime115(_PluginBase):
             self.save_data("tasks", tasks)
             if changed:
                 self.save_data("seen", seen)
+        moves = result.get("moves") or []
+        wrote = any(
+            item.get("action") in {"move", "strm"} and not item.get("error") and not item.get("strm_error")
+            for item in moves
+            if isinstance(item, dict)
+        )
+        self._refresh_emby_result(result, wrote, bool(moves))
         return result
 
     def _flatten(self) -> dict:
@@ -627,7 +644,24 @@ class Anime115(_PluginBase):
 
     def _strm(self) -> dict:
         limit = getattr(self, "_strm_limit", "") or ""
-        return write_library_strm(self._session(), self._config(), limit, report=self._report)
+        result = write_library_strm(self._session(), self._config(), limit, report=self._report)
+        wrote = not result.get("dry_run") and int(result.get("written") or 0) > 0
+        self._refresh_emby_result(result, wrote, int(result.get("written") or 0) > 0)
+        return result
+
+    def _refresh_emby_result(self, payload: dict, wrote: bool, planning: bool) -> None:
+        """整理或 strm 真正写盘后刷新指定 Emby 媒体库。失败只记字符串，不影响 ok。"""
+        if payload.get("dry_run"):
+            if planning:
+                payload["emby"] = "预览不刷新 Emby"
+            return
+        if not self._refresh_emby or not wrote:
+            return
+        try:
+            payload["emby"] = refresh_library(self._emby_library)
+        except Exception as exc:
+            payload["emby"] = f"刷新 Emby 失败：{exc}"
+        logger.info(f"动漫 115 {payload['emby']}")
 
     def _config(self) -> JobConfig:
         prefer = [item.strip() for item in self._fansub_prefer.split(",") if item.strip()]
@@ -719,15 +753,20 @@ class Anime115(_PluginBase):
             "picks": len(payload.get("picks") or []),
             "moved": payload.get("moved", 0),
             "counts": payload.get("counts") or {},
+            "emby": payload.get("emby") or "",
         })
         self.save_data("history", history[:50])
 
     def _announce(self, payload: dict) -> None:
-        if not self._notify or not payload.get("ok"):
+        """成功和失败都发，预览且没有任何动作时保持安静。"""
+        if not self._notify:
             return
-        if payload.get("dry_run") and not (payload.get("picks") or payload.get("proposals") or payload.get("moves")):
-            return
-        if payload.get("error") or payload.get("strm_error"):
+        if payload.get("dry_run") and not (
+            payload.get("picks")
+            or payload.get("proposals")
+            or payload.get("moves")
+            or payload.get("items")
+        ):
             return
         try:
             from app.schemas.types import NotificationType
@@ -760,6 +799,10 @@ class Anime115(_PluginBase):
             lines.append(f"目录：{data['inbox']}")
         if getattr(self, "_strm_root", ""):
             lines.append(f"strm：{self._strm_root}")
+        if getattr(self, "_refresh_emby", False):
+            lines.append(f"Emby：完成后刷新「{self._emby_library}」")
+        if data.get("emby"):
+            lines.append(f"Emby：{data['emby']}")
         lines.append("115：Cookie" if self._cookie_value() else "115：存储 " + self._storage)
         counts = data.get("counts") or {}
         if counts:
@@ -829,10 +872,14 @@ class _Mp115:
         moved = bool(U115Pan().move(item, Path(norm(dest_dir)), new_name))
         if moved:
             return True
-        if new_name != node.name:
+        # 宿主 move 在移动成功后还会回查目录并做同名 rename，任一步失败就返回 False。
+        # 115 列表有延迟，稍等一秒再核一次目标目录，避免把已经搬走的任务记成失败。
+        try:
+            self.sleep(1)
+            return any(child.name == new_name for child in self.list_dir(dest_dir))
+        except Exception as exc:
+            logger.info(f"动漫 115 移动失败后复查目标目录出错：{exc}")
             return False
-        landed = StorageChain().get_file_item(self.storage, Path(norm(dest_dir)) / new_name)
-        return landed is not None
 
     def delete_dir(self, path: str) -> bool:
         chain = StorageChain()
