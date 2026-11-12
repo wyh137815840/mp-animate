@@ -1829,7 +1829,21 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
     pack_seasons = _pack_seasons(pack_name or "")
     if len(pack_seasons) == 1:
         season = next(iter(pack_seasons))
+    # 每个文件自己写明的季号。parse_episode 认不出季时会默认第 1 季，不能拿它当依据。
+    explicit_seasons = set()
+    for video in videos:
+        parsed = parse_episode(video.name)
+        if parsed is None:
+            return []
+        explicit = _explicit_season(video.name)
+        if explicit is not None:
+            explicit_seasons.add(explicit)
+    if not season and len(explicit_seasons) == 1:
+        season = next(iter(explicit_seasons))
     if season <= 0:
+        return []
+    if len(explicit_seasons) > 1:
+        # 文件里写着不同的季，不敢拆
         return []
     items = []
     used = set()
@@ -1837,14 +1851,12 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
         parsed = parse_episode(video.name)
         if parsed is None:
             return []
-        file_season, episode = parsed
+        episode = parsed[1]
         if episode <= 0:
             return []
         explicit = _explicit_season(video.name)
         if explicit is not None and explicit != season:
             # 文件写的是别的季，不敢拆
-            return []
-        if file_season > 0 and explicit is None and file_season != season:
             return []
         if episode in used:
             # 同一集有多个版本，交给单集逻辑

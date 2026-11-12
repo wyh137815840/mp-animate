@@ -221,6 +221,54 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class RealPackNameTest(unittest.TestCase):
+    """生产上真实出现过的整包文件名。"""
+
+    def _files(self, pack, names):
+        return [_video(pack, name) for name in names]
+
+    def test_season_marked_pack(self):
+        pack = "/离线下载/动漫/20261109/[BDrip] Strike The Blood Final [JP][7³ACG]"
+        files = self._files(pack, [
+            "Strike The Blood Final S05E01-[1080p][BDRIP][x265.FLAC].mkv",
+            "Strike The Blood Final S05E02-[1080p][BDRIP][x265.FLAC].mkv",
+            "Strike The Blood Final S05E03-[1080p][BDRIP][x265.FLAC].mkv",
+            "Strike The Blood Final S05E04-[1080p][BDRIP][x265.FLAC].mkv",
+        ])
+        items = _pack_items(files, {"season": 5, "episode": 4}, pack, files)
+        self.assertEqual([item["episode"] for item in items], [1, 2, 3, 4])
+        self.assertTrue(all(item["season"] == 5 for item in items))
+
+    def test_pack_without_season_in_file_names(self):
+        """文件名不带季号时，按订阅的季算，不能当成第 1 季就拒掉。"""
+        pack = "/离线下载/动漫/20261109/[Nekomoe kissaten&LoliHouse] Megami no Cafe Terrace [01-12][WebRip 1080p HEVC-10bit AAC]"
+        files = self._files(pack, [
+            "[Nekomoe kissaten&LoliHouse] Megami no Cafe Terrace - 05 [WebRip 1080p HEVC-10bit AAC ASSx2].mkv",
+            "[Nekomoe kissaten&LoliHouse] Megami no Cafe Terrace - 06 [WebRip 1080p HEVC-10bit AAC ASSx2].mkv",
+        ])
+        items = _pack_items(files, {"season": 1, "episode": 5}, pack, files)
+        self.assertEqual([item["episode"] for item in items], [5, 6])
+
+    def test_season_from_pack_name(self):
+        """包名写着 S2 时，季以包名为准。"""
+        pack = "/离线下载/动漫/20261109/[LoliHouse] Kakkou no Iinazuke S2 [01-12][WebRip 1080p HEVC-10bit AAC]"
+        files = self._files(pack, [
+            "[LoliHouse] Kakkou no Iinazuke S2 - 01 [WebRip 1080p HEVC-10bit AAC].mkv",
+            "[LoliHouse] Kakkou no Iinazuke S2 - 02 [WebRip 1080p HEVC-10bit AAC].mkv",
+        ])
+        items = _pack_items(files, {"season": 2, "episode": 1}, pack, files)
+        self.assertEqual([item["episode"] for item in items], [1, 2])
+        self.assertTrue(all(item["season"] == 2 for item in items))
+
+    def test_file_of_other_season_is_refused(self):
+        pack = "/离线下载/动漫/20261109/Show [01-12]"
+        files = self._files(pack, [
+            "Show S02E01 [1080p].mkv",
+            "Show S02E02 [1080p].mkv",
+        ])
+        self.assertEqual(_pack_items(files, {"season": 1}, pack, files), [])
+
+
 class PublicRecordTest(unittest.TestCase):
     """对外记录不能带文件对象，否则存库会失败。"""
 
