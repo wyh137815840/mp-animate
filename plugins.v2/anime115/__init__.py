@@ -42,6 +42,9 @@ from .anime_names import Show, _fold_name, norm, parse_watchlist
 from .anime_subscribe import load_mp_subscriptions, shows_from_subscriptions
 from .anime_tmdb import live_bounds, shanghai_today
 
+# 剧名搜到的候选少于这个数时，用别名再搜一遍补齐。
+_ALIAS_SEARCH_THRESHOLD = 3
+
 _FORM_NOTE = (
     "先保持「只预览」。115 Cookie 含 UID= 时，本轮离线、整理和摊平都走这条 Cookie。"
     "留空或没有 UID= 时使用存储 ID 对应的已登录 115，默认 u115。"
@@ -62,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.38"
+    plugin_version = "1.0.39"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -997,6 +1000,31 @@ class _Mp115:
         return U115Pan()._request_api("GET", "/open/offline/get_quota_info")
 
 
+def _search_aliases(show: Show) -> list[str]:
+    """挑几个可能好用的别名。
+
+    TMDB 的别名顺序没意义（第一个常是西班牙语长名），而且有的别名只是剧名本身的
+    变体（包含剧名或是剧名的子串），拿它们去搜等于白搜。这里按「和剧名差得多、
+    又比较短」来排。
+    """
+    keyword = (getattr(show, "keyword", "") or "").strip()
+    folded_keyword = _fold_name(keyword)
+    usable = []
+    for alias in list(getattr(show, "extra_aliases", None) or []):
+        text = str(alias).strip()
+        if not text or text == keyword:
+            continue
+        folded = _fold_name(text)
+        if not folded or folded == folded_keyword:
+            continue
+        if folded_keyword and folded_keyword in folded:
+            # 只是剧名加了一堆后缀，搜它等于白搜
+            continue
+        usable.append(text)
+    usable.sort(key=len)
+    return usable[:3]
+
+
 def _fetch_candidates(keyword: str, cancel) -> list:
     """拉一次动漫花园。失败重试一次；还不行就当这部剧没有候选，不拖垮整轮。"""
     for attempt in range(2):
@@ -1021,21 +1049,23 @@ def _entries_for(show: Show, cancel, gap: dict) -> list:
         return []
     gap["done"] = True
     torrents = _fetch_candidates(show.keyword, cancel)
-    if not torrents:
-        # 用剧名搜不到时，换 TMDB 的别名再搜一次（订阅名和花园标题常常对不上）。
-        for alias in list(getattr(show, "extra_aliases", None) or [])[:2]:
+    if len(torrents) < _ALIAS_SEARCH_THRESHOLD:
+        # 剧名搜到的太少时，用 TMDB 的别名再搜并合并（订阅名和花园标题常常对不上）。
+        known = {item.title for item in torrents}
+        for alias in _search_aliases(show):
             if _event_set(cancel):
-                return []
+                return torrents
             _pause(cancel, 2)
             if _event_set(cancel):
-                return []
-            alias_text = str(alias).strip()
-            if not alias_text or alias_text == show.keyword:
+                return torrents
+            extra = _fetch_candidates(alias, cancel)
+            if not extra:
                 continue
-            torrents = _fetch_candidates(alias_text, cancel)
-            if torrents:
-                logger.info(f"动漫 115 {show.keyword} 用别名 {alias_text} 搜到 {len(torrents)} 条")
-                break
+            fresh = [item for item in extra if item.title not in known]
+            if fresh:
+                torrents.extend(fresh)
+                known.update(item.title for item in fresh)
+                logger.info(f"动漫 115 {show.keyword} 用别名 {alias} 补到 {len(fresh)} 条")
     if _event_set(cancel) or all(item.size for item in torrents):
         return torrents
     _pause(cancel, 2)
