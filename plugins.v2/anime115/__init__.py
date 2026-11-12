@@ -65,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.41"
+    plugin_version = "1.0.42"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -1014,11 +1014,15 @@ def _short_keywords(show: Show) -> list[str]:
     keyword = (getattr(show, "keyword", "") or "").strip()
     if not keyword:
         return []
-    for sep in ("，", ",", "（", "(", "「", "『", "/", "：", ":"):
+    heads = []
+    for sep in ("，", ",", "（", "(", "「", "『", "/", "：", ":", " ", "\t"):
         head = keyword.split(sep)[0].strip()
-        if len(head) >= 2 and head != keyword:
-            return [head]
-    return []
+        head = head.strip("\u300c\u300d\u300e\u300f\"\u2018\u2019\"\u201c\u201d\uff08\uff09()【】[] ")
+        if len(head) >= 2 and head != keyword and head not in heads:
+            heads.append(head)
+    # 短的更可能是花园那边收录的名字
+    heads.sort(key=len)
+    return heads[:2]
 
 
 def _search_aliases(show: Show) -> list[str]:
