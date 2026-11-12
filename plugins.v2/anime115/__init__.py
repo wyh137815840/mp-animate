@@ -65,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.42"
+    plugin_version = "1.0.43"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -94,6 +94,8 @@ class Anime115(_PluginBase):
     _lookback_hours = 36
     _min_episode_mb = 80
     _max_episode_gb = 8
+    _max_pack_gb = 120
+    _subtitle = True
     _offline_gap_seconds = 20
     _max_submit_per_run = 10
     _move_gap_seconds = 2
@@ -152,6 +154,8 @@ class Anime115(_PluginBase):
         self._lookback_hours = _as_int(config.get("lookback_hours"), 36)
         self._min_episode_mb = _as_int(config.get("min_episode_mb"), 80)
         self._max_episode_gb = _as_int(config.get("max_episode_gb"), 8)
+        self._max_pack_gb = _as_int(config.get("max_pack_gb"), 120)
+        self._subtitle = bool(config.get("subtitle", True))
         self._offline_gap_seconds = _as_int(config.get("offline_gap_seconds"), 20)
         self._max_submit_per_run = _as_int(config.get("max_submit_per_run"), 10)
         self._move_gap_seconds = _as_int(config.get("move_gap_seconds"), 2)
@@ -298,6 +302,8 @@ class Anime115(_PluginBase):
                             _area("flatten_roots", "摊平目录，每行一个", "/离线下载/动漫"),
                             _field(3, "min_episode_mb", "最小体积(MB)", "80"),
                             _field(3, "max_episode_gb", "最大体积(GB)", "8"),
+                            _field(3, "max_pack_gb", "整包最大体积(GB)", "120，蓝光大包按单集算体积"),
+                            _switch(3, "subtitle", "把字幕下载到 Emby 旁边"),
                             _field(3, "max_submit_per_run", "每次最多提交", "10"),
                             _field(3, "flatten_max_moves", "每次最多摊平", "30"),
                         ],
@@ -338,6 +344,8 @@ class Anime115(_PluginBase):
             "flatten_roots": "",
             "min_episode_mb": 80,
             "max_episode_gb": 8,
+            "max_pack_gb": 120,
+            "subtitle": True,
             "max_submit_per_run": 10,
             "flatten_max_moves": 30,
         }
@@ -777,6 +785,7 @@ class Anime115(_PluginBase):
                 lookback_hours=self._lookback_hours,
                 min_episode_mb=self._min_episode_mb,
                 max_episode_gb=self._max_episode_gb,
+                max_pack_gb=self._max_pack_gb,
                 fansub_prefer=prefer,
             ),
             offline_gap_seconds=self._offline_gap_seconds,
@@ -789,6 +798,7 @@ class Anime115(_PluginBase):
             strm_for=self._strm_for,
             public_hosts=self._public_hosts,
             skip_owned=self._skip_owned,
+            subtitle_enabled=self._subtitle,
         )
 
     def _report(self, patch: dict) -> None:

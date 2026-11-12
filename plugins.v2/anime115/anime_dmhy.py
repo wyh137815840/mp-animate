@@ -78,6 +78,7 @@ class SearchOptions:
     lookback_hours: int = 36
     min_episode_mb: int = 80
     max_episode_gb: int = 8
+    max_pack_gb: int = 120
     fansub_prefer: list[str] = field(default_factory=list)
     bounds_of: Callable[[Show, int], tuple[int, int | None] | None] | None = None
 
@@ -313,10 +314,9 @@ def score_torrent(
     if torrent.published is not None and _too_old(torrent.published, now, options.lookback_hours):
         return None, "超出回溯时间"
     if torrent.size:
-        if torrent.size < options.min_episode_mb * 1024 * 1024:
-            return None, "体积过小"
-        if torrent.size > options.max_episode_gb * 1024 ** 3:
-            return None, "体积过大"
+        reason = _size_gate(title, torrent.size, options)
+        if reason:
+            return None, reason
     score = 0
     groups = [*show.groups, *options.fansub_prefer]
     if any(group and group.casefold() in title.casefold() for group in groups):
@@ -369,6 +369,60 @@ def _is_batch(title: str) -> bool:
     if not _BATCH.search(title):
         return False
     return bool(_BATCH_KEYWORDS.search(title)) or _has_episode_range(title)
+
+
+# 集数不明的整包写法。用来判断「这一整包」而不是单集。
+_WHOLE_PACK_WORDS = (
+    "全集", "合集", "整季", "全季", "完结", "完結", "complete", "collection",
+    "tv全集", "bd-box", "bdbox", "bd box", "全合集",
+)
+
+
+def _pack_episode_count(title: str) -> int:
+    """整包覆盖的集数。认不出返回 0。"""
+    span = parse_episode_range(title)
+    if not span:
+        return 0
+    first, second = span
+    return second - first + 1
+
+
+def _is_whole_pack(title: str) -> bool:
+    """集数不明的整包：全集、合集、BD-BOX 这类。剧场版合集不算。"""
+    text = title or ""
+    if _NOT_EPISODE_PACK.search(text):
+        return False
+    lowered = text.lower()
+    return any(word in lowered for word in _WHOLE_PACK_WORDS)
+
+
+def _size_gate(title: str, size: int, options: SearchOptions) -> str:
+    """按整包还是单集判断体积。整包看单集体积，另外还有整体上限。
+
+    蓝光大包整体能有几十上百 G，按单集算才不会误判成体积过大。
+    """
+    count = _pack_episode_count(title)
+    if count:
+        per = size / count
+        # 整包的下限放宽一半：包里每一集本来就比单集下载小一点
+        floor = max(options.min_episode_mb // 2, 20) * 1024 * 1024
+        if per < floor:
+            return "单集体积过小"
+        if per > options.max_episode_gb * 1024 ** 3:
+            return "单集体积过大"
+        if options.max_pack_gb and size > options.max_pack_gb * 1024 ** 3:
+            return "整包体积过大"
+        return ""
+    if _is_whole_pack(title):
+        # 集数不明，只看整体上限；单集体积等拆包时再看
+        if options.max_pack_gb and size > options.max_pack_gb * 1024 ** 3:
+            return "整包体积过大"
+        return ""
+    if size < options.min_episode_mb * 1024 * 1024:
+        return "体积过小"
+    if size > options.max_episode_gb * 1024 ** 3:
+        return "体积过大"
+    return ""
 
 
 def _floor_height(resolution: str) -> int:

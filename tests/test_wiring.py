@@ -162,9 +162,10 @@ class RefreshResultTest(unittest.TestCase):
 class VersionTest(unittest.TestCase):
     def test_package_and_history(self):
         package = json.loads((Path(__file__).resolve().parents[1] / "package.v2.json").read_text(encoding="utf-8"))
-        self.assertEqual(package["Anime115"]["version"], "1.0.42")
+        self.assertEqual(package["Anime115"]["version"], "1.0.43")
         self.assertIn("按长度排序", package["Anime115"]["history"]["v1.0.42"])
-        self.assertEqual(_PLUGIN.Anime115.plugin_version, "1.0.42")
+        self.assertIn("蓝光大包", package["Anime115"]["history"]["v1.0.43"])
+        self.assertEqual(_PLUGIN.Anime115.plugin_version, "1.0.43")
 
 
 if __name__ == "__main__":

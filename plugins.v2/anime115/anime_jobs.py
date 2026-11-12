@@ -23,6 +23,15 @@ from .anime_flatten import Node, apply_proposals, propose
 from .anime_names import Show, _fold_name, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
 from .anime_playurl import PlayUrlError, play_url_for_strm
 from .anime_strm import commit_strm, pickcode_of, strm_relative
+from .anime_subs import (
+    fetch_bytes,
+    is_subtitle_dir,
+    is_subtitle_name,
+    match_subtitles,
+    subtitle_relative,
+    unpack,
+    write_sidecar,
+)
 
 
 SUB_EXTS = {".ass", ".srt", ".ssa", ".sup", ".sub", ".idx", ".vtt"}
@@ -244,6 +253,7 @@ class JobConfig:
     strm_for: str = ""
     public_hosts: str = ""
     skip_owned: bool = True
+    subtitle_enabled: bool = True
 
 
 def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None) -> dict:
@@ -536,10 +546,11 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
                 continue
             ok = True
             for node in item["nodes"]:
+                new_name = _move_name(item, node)
                 try:
                     moved = _call(
                         session,
-                        lambda node=node: session.move(node, dest_dir, node.name),
+                        lambda node=node, new_name=new_name: session.move(node, dest_dir, new_name),
                         _task_limit(deadline),
                     )
                 except JobStopped:
@@ -1276,7 +1287,13 @@ def _scope_to_pack(session, task: dict, offline: dict, deadline: float = None) -
     if chosen is not None:
         if chosen.is_dir:
             return _flatten_list(session, chosen.path, depth=3, deadline=deadline), chosen.path, "", True
-        return _file_and_sidecars(children, chosen), chosen.path, "", True
+        files = _file_and_sidecars(children, chosen)
+        known = {item.path for item in files}
+        for node in _subtitle_in_dirs(session, children, deadline):
+            if node.path not in known:
+                files.append(node)
+                known.add(node.path)
+        return files, chosen.path, "", True
     dirs = [item for item in children if item.is_dir]
     if not dirs:
         videos = _real_videos(children)
@@ -1723,6 +1740,31 @@ def _file_and_sidecars(children: list[Node], video: Node) -> list[Node]:
     return kept
 
 
+def _subtitle_in_dirs(session, children: list[Node], deadline: float = None) -> list[Node]:
+    """子目录里的字幕文件。
+
+    很多资源把字幕放在 Subs、字幕、CHS 这类子目录里，只列这些目录，不乱扫。
+    """
+    found = []
+    for item in children:
+        if not getattr(item, "is_dir", False):
+            continue
+        if not is_subtitle_dir(item.name):
+            continue
+        try:
+            nodes = _list_dir(session, item.path, deadline)
+        except JobStopped:
+            raise
+        except Exception:
+            continue
+        for node in nodes:
+            if getattr(node, "is_dir", False):
+                continue
+            if is_subtitle_name(node.name):
+                found.append(node)
+    return found
+
+
 def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
     """这一包里只有一个正片就用它。多个正片时只留集数对得上的，不对跨包合并。"""
     videos = _real_videos(files)
@@ -1908,6 +1950,22 @@ def _pack_sidecars(files: list[Node], video: Node) -> list[Node]:
     return kept
 
 
+def _move_name(item: dict, node: Node) -> str:
+    """搬到季目录时的名字。
+
+    字幕改成跟这一集的视频同名，只换扩展名：整包里各集的字幕常常重名，
+    直接搬会撞车。
+    """
+    subs = {getattr(sub, "path", "") for sub in item.get("subs") or []}
+    if getattr(node, "path", "") not in subs:
+        return node.name
+    video = item.get("video")
+    stem = (video.name.rsplit(".", 1)[0] if video is not None else node.name) or node.name
+    suffix = _suffix(node.name) or ".ass"
+    name = f"{stem[:200]}{suffix}"
+    return name
+
+
 def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "") -> dict:
     # 整包优先：包里多集时按每集自己的集数拆开入库。
     all_videos = _real_videos(files)
@@ -1918,7 +1976,17 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
             season = items[0]["season"]
             dest_dir = join_path(join_path(library, show), f"Season {season:02d}")
             for item in items:
-                item["nodes"] = [item["video"], *_pack_sidecars(files, item["video"])]
+                sidecars = _pack_sidecars(files, item["video"])
+                # 字幕可能在 Subs、字幕这样的子目录里，按集数认。
+                subs = match_subtitles(files, item["video"], int(item.get("episode") or 0),
+                                       int(item.get("season") or 0))
+                known = {node.path for node in sidecars}
+                for node in subs:
+                    if node.path not in known:
+                        sidecars.append(node)
+                        known.add(node.path)
+                item["nodes"] = [item["video"], *sidecars]
+                item["subs"] = subs
             return {
                 "action": "move",
                 "reason": "ok",
@@ -1959,6 +2027,12 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
             item.name.startswith(stem + ".") or item.name.startswith(stem + " ")
         ))
     ]
+    subs = match_subtitles(files, video, episode, season)
+    known = {item.path for item in sidecars}
+    for item in subs:
+        if item.path not in known:
+            sidecars.append(item)
+            known.add(item.path)
     return {
         "action": "move",
         "reason": "ok",
@@ -1968,6 +2042,7 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
         "season": season,
         "episode": episode,
         "nodes": [video, *sidecars],
+        "subs": subs,
     }
 
 
@@ -1990,6 +2065,9 @@ def _apply_strm(decision: dict, config: JobConfig, write: bool, cancel=None) -> 
     result = _write_strm_for(decision, config, video, int(decision.get("season") or 0),
                               int(decision.get("episode") or 0), write=write, cancel=cancel)
     decision.update(result)
+    if result.get("strm_relative") and not result.get("strm_skipped"):
+        _apply_subtitles(decision, decision.get("subs") or [], config,
+                         result["strm_relative"], write=write, cancel=cancel)
 
 
 def _apply_strm_item(decision: dict, item: dict, config: JobConfig, write: bool, cancel=None) -> None:
@@ -2013,6 +2091,50 @@ def _apply_strm_item(decision: dict, item: dict, config: JobConfig, write: bool,
         item["strm_error"] = result["strm_error"]
     if result.get("strm_skipped"):
         item["strm_skipped"] = result["strm_skipped"]
+    if result.get("strm_relative") and not result.get("strm_skipped"):
+        _apply_subtitles(decision, item.get("subs") or [], config,
+                         result["strm_relative"], write=write, cancel=cancel, item=item)
+
+
+def _apply_subtitles(decision: dict, subs: list, config: JobConfig, relative: str,
+                     write: bool, cancel=None, item: dict = None) -> None:
+    """把这一集的字幕下载到 .strm 旁边。
+
+    Emby 播 .strm 时视频走 115 直链，字幕得是本地真实文件才认。
+    """
+    target = item if item is not None else decision
+    if not config.subtitle_enabled:
+        return
+    root = (config.strm_root or "").strip()
+    if not root or not subs or not relative:
+        return
+    written = []
+    for node in subs:
+        if _event_set(cancel):
+            return
+        code = pickcode_of(node)
+        if not code:
+            target["sub_error"] = "字幕缺少 pickcode"
+            continue
+        try:
+            url = _play_url(config, code, node.name)
+        except PlayUrlError as exc:
+            target["sub_error"] = str(exc)
+            continue
+        sub_relative = subtitle_relative(relative, node.name)
+        if not write:
+            written.append(str(Path(root) / sub_relative))
+            continue
+        try:
+            data = unpack(fetch_bytes(url), node.name)
+            path = write_sidecar(root, sub_relative, data)
+        except Exception as exc:
+            _job_log(f"动漫 115 字幕下载失败 {node.name}：{exc}", "warning")
+            target["sub_error"] = f"字幕下载失败：{exc}"
+            continue
+        written.append(path)
+    if written:
+        target["subs_written"] = written
 
 
 def _write_strm_for(decision: dict, config: JobConfig, video, season: int, episode: int,
@@ -2277,7 +2399,7 @@ def _season_dir_number(name: str) -> int:
 
 def _public_split(decision: dict) -> dict:
     """拆包记录要能存进数据库，不能带着文件对象。"""
-    hidden = {"nodes", "items", "strm_url", "strm_relative"}
+    hidden = {"nodes", "items", "subs", "strm_url", "strm_relative"}
     record = {key: value for key, value in decision.items() if key not in hidden}
     episodes = []
     for item in decision.get("items") or []:
@@ -2298,7 +2420,7 @@ def _public_split(decision: dict) -> dict:
 
 def _public_move(decision: dict) -> dict:
     """对外的记录不能带文件对象，否则存库会失败。"""
-    hidden = {"nodes", "items", "strm_url", "strm_relative"}
+    hidden = {"nodes", "items", "subs", "strm_url", "strm_relative"}
     record = {key: value for key, value in decision.items() if key not in hidden}
     items = decision.get("items")
     if isinstance(items, list):

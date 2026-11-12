@@ -72,6 +72,22 @@ _STRM_RETRY_PAUSE = 1.0
 
 def write_strm(root: str, relative: str, url: str) -> str:
     """把一行播放地址写到 strm 根下。不创建 nfo 或图片。"""
+    target = _safe_target(root, relative)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(url.strip() + "\n", encoding="utf-8")
+    return str(target)
+
+
+def write_bytes(root: str, relative: str, data: bytes) -> str:
+    """把二进制内容写到 strm 根下。字幕和 strm 放在一起。"""
+    target = _safe_target(root, relative)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return str(target)
+
+
+def _safe_target(root: str, relative: str) -> Path:
+    """算出要写的文件，不许跑出 strm 根。"""
     base = Path(root).expanduser().resolve()
     parts = [part for part in relative.split("/") if part and part not in (".", "..")]
     if not parts:
@@ -79,9 +95,7 @@ def write_strm(root: str, relative: str, url: str) -> str:
     target = (base / Path(*parts)).resolve()
     if base != target and base not in target.parents:
         raise OSError("strm 路径越界")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(url.strip() + "\n", encoding="utf-8")
-    return str(target)
+    return target
 
 
 def free_bytes(path: str) -> int | None:
