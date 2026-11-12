@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import re
-import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .anime_call import (
+    OFFLINE_TIMEOUT,
+    STORAGE_TIMEOUT,
+    Stopped,
+    stopped,
+    system_stopped,
+    wait_call,
+)
 from .anime_dmhy import Pick, SearchOptions, select_shows
 from .anime_flatten import Node, apply_proposals, propose
 from .anime_names import Show, _fold_name, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
@@ -20,10 +26,13 @@ SUB_EXTS = {".ass", ".srt", ".ssa", ".sup", ".sub", ".idx", ".vtt"}
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".ts", ".m2ts"}
 _SHOW_YEAR = re.compile(r"^(.+?)\s*[(（](\d{4})[)）](?:\s*\{tmdb-\d+\})?$")
 # 开放平台和 p115client 都可能一直不返回。到点就结束这一轮，避免整理把后面的周期全部挡住。
-_OFFLINE_CALL_TIMEOUT = 45
+# 默认时限来自 anime_call：离线列表 45 秒，列目录/移动 60 秒。
+# 这里保留一份可覆盖的副本，单测可以把 _OFFLINE_CALL_TIMEOUT 调小来验证超时路径。
+_OFFLINE_CALL_TIMEOUT = OFFLINE_TIMEOUT
+_STORAGE_CALL_TIMEOUT = STORAGE_TIMEOUT
 
 
-class JobStopped(Exception):
+class JobStopped(Stopped):
     """停止或重载把这一轮取消了。"""
 
 
@@ -32,38 +41,42 @@ def _event_set(cancel) -> bool:
 
 
 def _cancelled(session) -> bool:
-    return _event_set(getattr(session, "cancel", None))
+    """任务被停止，或者宿主正在关停。"""
+    return stopped(getattr(session, "cancel", None))
 
 
-def _call(session, func):
+def _system_stopped() -> bool:
+    """宿主正在关停。只在长循环里抽查，避免频繁读全局状态。"""
+    return system_stopped()
+
+
+def _call(session, func, timeout: float = None):
     """在限时内等 115 返回。停止或重载时不再占着这一轮。"""
-    return _wait_call(getattr(session, "cancel", None), func, _OFFLINE_CALL_TIMEOUT)
+    limit = _OFFLINE_CALL_TIMEOUT if timeout is None else timeout
+    try:
+        return wait_call(getattr(session, "cancel", None), func, limit)
+    except Stopped as exc:
+        raise JobStopped(str(exc)) from exc
 
 
-def _wait_call(cancel, func, timeout: float):
-    if _event_set(cancel):
-        raise JobStopped("已停止")
-    outcome = {}
+def _call_safe(session, func, default=None, label: str = "115 调用", timeout: float = None):
+    """限时调用一次 115。超时或出错就返回默认值，不打断整轮。"""
+    try:
+        return _call(session, func, timeout)
+    except JobStopped:
+        raise
+    except TimeoutError as exc:
+        _job_log(f"动漫 115 {label}超时：{exc}", "warning")
+        return default
+    except Exception as exc:
+        _job_log(f"动漫 115 {label}失败：{exc}", "warning")
+        return default
 
-    def run():
-        try:
-            outcome["value"] = func()
-        except Exception as exc:
-            outcome["error"] = exc
 
-    worker = threading.Thread(target=run, name="anime115-115", daemon=True)
-    worker.start()
-    deadline = time.monotonic() + timeout
-    while worker.is_alive():
-        if _event_set(cancel):
-            raise JobStopped("已停止")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f"115 请求超过 {int(timeout)} 秒")
-        worker.join(min(0.5, remaining))
-    if "error" in outcome:
-        raise outcome["error"]
-    return outcome.get("value")
+def _list_dir(session, path: str) -> list:
+    """限时列一层目录。失败或超时抛出去，由调用方决定这一条怎么记。"""
+    items = _call(session, lambda: session.list_dir(path) or [], _STORAGE_CALL_TIMEOUT)
+    return list(items)
 
 
 def _job_log(message: str, level: str = "info") -> None:
@@ -292,6 +305,8 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
             return _daily_stopped(config, inbox, chosen, notes, submitted)
         if quota is not None and quota <= 0:
             break
+        if index % 5 == 0 and _system_stopped():
+            return _daily_stopped(config, inbox, chosen, notes, submitted)
         if index:
             session.sleep(config.offline_gap_seconds)
         if _cancelled(session):
@@ -383,6 +398,8 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
     for index, pair in enumerate(work, start=1):
         if _cancelled(session):
             return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
+        if index % 5 == 0 and _system_stopped():
+            return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         task, offline = pair
         try:
             _organize_one(task, session, library, config, moves, offline)
@@ -441,7 +458,9 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
         return
     dest_dir = decision["dest_dir"]
     try:
-        made = session.ensure_dir(dest_dir)
+        made = _call(session, lambda: session.ensure_dir(dest_dir), _STORAGE_CALL_TIMEOUT)
+    except JobStopped:
+        raise
     except Exception as exc:
         _log_mkdir(dest_dir, exc)
         made = None
@@ -454,7 +473,9 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
         decision["error"] = f"{dest_dir}：{failure}" if failure is not None else f"{dest_dir}：没有目录 id"
         return
     try:
-        existing = {item.name for item in session.list_dir(dest_dir)}
+        existing = {item.name for item in _list_dir(session, dest_dir)}
+    except JobStopped:
+        raise
     except Exception:
         existing = set()
     if decision["name"] in existing:
@@ -462,7 +483,14 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
         decision["reason"] = "collision"
         return
     for item in decision["nodes"]:
-        if not session.move(item, dest_dir, item.name):
+        try:
+            moved = _call(session, lambda item=item: session.move(item, dest_dir, item.name), _STORAGE_CALL_TIMEOUT)
+        except JobStopped:
+            raise
+        except Exception as exc:
+            _job_log(f"动漫 115 移动失败 {item.name}：{exc}", "warning")
+            moved = False
+        if not moved:
             decision["action"] = "leave"
             decision["reason"] = "移动失败"
             return
@@ -577,7 +605,10 @@ def run_flatten(session, config: JobConfig, report=None) -> dict:
         return {"ok": False, "error": "已停止", "counts": {}, "dry_run": config.dry_run, "moved": 0}
     proposals = propose(nodes, roots, config.min_episode_mb * 1024 * 1024)
     apply = (not config.dry_run) and config.flatten_apply
-    moved = apply_proposals(proposals, session, apply, config.flatten_max_moves)
+    try:
+        moved = apply_proposals(proposals, session, apply, config.flatten_max_moves)
+    except Stopped as exc:
+        raise JobStopped(str(exc)) from exc
     if moved:
         _delete_empty(session, proposals, set(roots))
     counts = {"ok_eligible_non_collision": 0, "collision": 0, "uncertain": 0, "skip": 0}
@@ -716,9 +747,14 @@ def _delete_empty(session, proposals, roots: set[str]) -> None:
     for path in parents:
         if path in roots or path == "/":
             continue
-        if session.list_dir(path):
-            continue
-        session.delete_dir(path)
+        try:
+            if _list_dir(session, path):
+                continue
+            _call(session, lambda: session.delete_dir(path), _STORAGE_CALL_TIMEOUT)
+        except JobStopped:
+            raise
+        except Exception as exc:
+            _job_log(f"动漫 115 清理空目录失败 {path}：{exc}", "warning")
 
 
 def _pick_row(pick: Pick) -> dict:
@@ -817,6 +853,8 @@ def _offline_index(session) -> tuple[dict[str, dict], bool]:
     for page in range(1, _OFFLINE_PAGE_LIMIT + 1):
         if _cancelled(session):
             raise JobStopped("已停止")
+        if page % 5 == 0 and _system_stopped():
+            raise JobStopped("系统正在停止")
         _job_log(f"动漫 115 整理离线列表第 {page} 页")
         try:
             payload = _call(session, lambda page=page: session.list_offline(page))
@@ -991,7 +1029,9 @@ def resolve_show_folder(names: list[str], show: str) -> tuple[str, str]:
 
 def _show_folder(session, library: str, show: str) -> tuple[str, str]:
     try:
-        children = session.list_dir(library) or []
+        children = _list_dir(session, library)
+    except JobStopped:
+        raise
     except Exception:
         children = []
     names = [item.name for item in children if getattr(item, "is_dir", False)]
@@ -1021,7 +1061,7 @@ class _OwnedIndex:
         if not self.library or self.library == "/":
             return None
         if self._folders is None:
-            items = self.session.list_dir(self.library) or []
+            items = _list_dir(self.session, self.library)
             self._folders = [item.name for item in items if getattr(item, "is_dir", False)]
         if not self._folders:
             return None
@@ -1071,7 +1111,9 @@ class _OwnedIndex:
     def _load_episodes(self, folder: str, season: int) -> set[int] | None:
         show_dir = join_path(self.library, folder)
         try:
-            children = self.session.list_dir(show_dir) or []
+            children = _list_dir(self.session, show_dir)
+        except JobStopped:
+            raise
         except Exception:
             return None
         season_dirs = [
@@ -1084,7 +1126,9 @@ class _OwnedIndex:
         episodes: set[int] = set()
         for season_dir in season_dirs:
             try:
-                files = self.session.list_dir(season_dir.path) or []
+                files = _list_dir(self.session, season_dir.path)
+            except JobStopped:
+                raise
             except Exception:
                 continue
             for item in files:
@@ -1123,7 +1167,7 @@ def _scope_to_pack(session, task: dict, offline: dict) -> tuple[list[Node], str,
         return [], "", "没有离线目录", False
     wanted = _wanted_names(task, offline)
     file_id = _offline_file_id(offline)
-    children = list(session.list_dir(inbox) or [])
+    children = _list_dir(session, inbox)
     if _folder_is_pack(inbox, wanted):
         files = _flatten_list(session, inbox, depth=3)
         return files, inbox, "", _pack_seen(session, inbox, children, files)
@@ -1179,7 +1223,9 @@ def _dir_listed(session, folder: str) -> bool:
     parent = parent_path(folder)
     leaf = name_of(folder)
     try:
-        children = session.list_dir(parent) or []
+        children = _list_dir(session, parent)
+    except JobStopped:
+        raise
     except Exception:
         return False
     for item in children:
@@ -1304,7 +1350,7 @@ def _choose_by_nested_id(session, children: list[Node], file_id: str) -> tuple[N
     for directory in children:
         if not directory.is_dir:
             continue
-        nested = session.list_dir(directory.path) or []
+        nested = _list_dir(session, directory.path)
         if any(_node_file_id(item) == file_id for item in nested):
             owners.append(directory)
     if len(owners) == 1:
@@ -1410,7 +1456,7 @@ def _flatten_list(session, root: str, depth: int) -> list[Node]:
         if current in seen or level > depth:
             continue
         seen.add(current)
-        for item in session.list_dir(current) or []:
+        for item in _list_dir(session, current):
             node = item if isinstance(item, Node) else Node(
                 path=norm(getattr(item, "path", "")),
                 name=getattr(item, "name", "") or name_of(getattr(item, "path", "")),
@@ -1529,13 +1575,13 @@ def _library_videos(session, library: str, limit: str) -> list[dict]:
     if limit and norm(limit) != library:
         shows = [Node(norm(limit), name_of(limit), True)]
     else:
-        shows = [item for item in (session.list_dir(library) or []) if item.is_dir]
+        shows = [item for item in _list_dir(session, library) if item.is_dir]
     rows = []
     for show in shows:
-        for child in session.list_dir(show.path) or []:
+        for child in _list_dir(session, show.path):
             season_no = _season_dir_number(child.name) if child.is_dir else 0
             if season_no:
-                for video in session.list_dir(child.path) or []:
+                for video in _list_dir(session, child.path):
                     if _is_video_file(video):
                         rows.append(_video_row(show.name, season_no, video))
                 continue

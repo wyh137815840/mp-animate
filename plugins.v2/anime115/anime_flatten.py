@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .anime_call import STORAGE_TIMEOUT, Stopped, wait_call
 from .anime_names import join_path, name_of, norm, parent_path
 
 
@@ -105,7 +106,17 @@ def apply_proposals(proposals: list[Proposal], session, apply: bool, limit: int)
     for item in safe:
         if moved >= limit:
             break
-        if session.move(item.node, parent_path(item.dest), name_of(item.dest)):
+        try:
+            ok = wait_call(
+                getattr(session, "cancel", None),
+                lambda item=item: session.move(item.node, parent_path(item.dest), name_of(item.dest)),
+                STORAGE_TIMEOUT,
+            )
+        except Stopped:
+            raise
+        except Exception:
+            ok = False
+        if ok:
             moved += 1
     return moved
 
