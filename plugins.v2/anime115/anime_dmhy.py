@@ -231,6 +231,23 @@ def select_one(
         if parsed is None:
             pack = parse_episode_range(torrent.title)
             if pack is None:
+                head = _head_episode(torrent.title)
+                if head:
+                    # 集数粘在标题末尾（如「…传说04」），按单集收。
+                    season = int(show.season or 1)
+                    pick = Pick(show.keyword, season, head, torrent, score)
+                    current = best.get((season, head))
+                    if current is None or _better(pick, current):
+                        best[(season, head)] = pick
+                    continue
+                # 标题里没有集数标记的整季包：包里每一集的文件名带集数，整理时再拆。
+                if _is_season_pack(torrent.title):
+                    season = int(show.season or 1)
+                    pick = Pick(show.keyword, season, 0, torrent, score, pack=(0, 0))
+                    current = packs.get((season, 0))
+                    if current is None or _better(pick, current):
+                        packs[(season, 0)] = pick
+                    continue
                 notes.append({"show": show.keyword, "title": torrent.title, "reason": "集数不确定"})
                 continue
             # 整包：01-12 这种。范围包要先认季，再看是不是这一季的。
@@ -313,6 +330,38 @@ def score_torrent(
     elif re.search(r"繁体|CHT|BIG5", title, re.IGNORECASE):
         score += 5
     return score, ""
+
+
+# 标题里没有集数、但明显是整季/全集的包。OVA、特典、剧场版、SP 不是正片，不要收。
+_SEASON_PACK_WORDS = (
+    "全集", "合集", "整季", "全季", "完结", "完結", "complete", "collection",
+    "bdrip", "bdr rip", "bd-box", "bdbox", "tv全集", "season",
+)
+_NOT_EPISODE_PACK = re.compile(r"OVA|特典|剧场版|劇場版|电影版|電影版|\bSP\b|预告|預告|片頭|片尾|NCOP|NCED", re.IGNORECASE)
+
+
+# 标题第一段末尾粘着的集数，如「…于是10年后我成为了传说04」。
+_HEAD_EPISODE = re.compile(r"(?<!\d)(\d{1,2})\s*$")
+
+
+def _head_episode(title: str) -> int:
+    """标题第一段末尾的集数。认不出就返回 0。"""
+    head = (title or "").split("|")[0]
+    head = re.sub(r"[\[\]【】()（）]", " ", head).strip()
+    matched = _HEAD_EPISODE.search(head)
+    if not matched:
+        return 0
+    number = int(matched.group(1))
+    return number if 0 < number < 100 else 0
+
+
+def _is_season_pack(title: str) -> bool:
+    """标题里没有集数标记、但像是整季包的种子。"""
+    text = title or ""
+    if _NOT_EPISODE_PACK.search(text):
+        return False
+    lowered = text.lower()
+    return any(word in lowered for word in _SEASON_PACK_WORDS)
 
 
 def _is_batch(title: str) -> bool:
