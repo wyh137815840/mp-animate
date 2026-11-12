@@ -65,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.39"
+    plugin_version = "1.0.40"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -671,10 +671,15 @@ class Anime115(_PluginBase):
             key_text = str(show.tmdb_id)
             if key_text not in titles:
                 try:
-                    titles[key_text] = alt_titles(int(show.tmdb_id), key)
+                    found = alt_titles(int(show.tmdb_id), key)
                 except Exception as exc:
                     logger.info(f"动漫 115 取 TMDB 别名失败 {show.tmdb_id}：{exc}")
-                    titles[key_text] = []
+                    found = []
+                # 取失败或取到空时不要写进缓存，免得一次网络抖动毒化一整天
+                if found:
+                    titles[key_text] = found
+                else:
+                    titles.pop(key_text, None)
             return titles.get(key_text) or []
 
         self._alias_cache = (cache, titles)
@@ -1022,7 +1027,7 @@ def _search_aliases(show: Show) -> list[str]:
             continue
         usable.append(text)
     usable.sort(key=len)
-    return usable[:3]
+    return usable[:5]
 
 
 def _fetch_candidates(keyword: str, cancel) -> list:
