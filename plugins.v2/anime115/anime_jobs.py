@@ -567,7 +567,7 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
         moved_items = 0
         failed = 0
         for item in decision["items"]:
-            if item["video"].name in existing:
+            if any(video.name in existing for video in (item.get("videos") or [item["video"]])):
                 item["skipped"] = "collision"
                 continue
             ok = True
@@ -1907,6 +1907,8 @@ def _pack_episode(name: str) -> int:
 # 整包里文件名末尾直接跟集数：Strike the Blood 23
 # 数字前面不能挨着字母（SP30、OVA2 这类特别篇不算正片集数），也不能挨着数字。
 _PACK_TRAILING_NUMBER = re.compile(r"(?<![0-9A-Za-z])(\d{1,3})\s*$")
+# 方括号里的纯数字：[04][1080P][简体] 这种 OVA 整包里常见
+_PACK_TAG_NUMBER = re.compile(r"[\[【]\s*(\d{1,3})\s*[\]】]")
 # 文件名里的方括号标签
 _PACK_TAGS = re.compile(r"[\[\(【][^\]\)】]*[\]\)】]")
 
@@ -1934,6 +1936,11 @@ def _pack_episode_full(name: str) -> int:
     matched = _PACK_TRAILING_NUMBER.search(stripped.strip())
     if matched:
         number = int(matched.group(1))
+        if 0 < number < 1000:
+            return number
+    # 方括号里的纯数字：[04][1080p][简体]
+    for tag in _PACK_TAG_NUMBER.finditer(text):
+        number = int(tag.group(1))
         if 0 < number < 1000:
             return number
     return 0
@@ -1980,10 +1987,14 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
             # 文件写的是别的季，不敢拆
             return []
         if episode in used:
-            # 同一集有多个版本，交给单集逻辑
-            return []
+            # 同一集有多个版本（NC、CM&PV 之类）：算多版本，一起搬
+            for item in items:
+                if item["episode"] == episode:
+                    item["videos"].append(video)
+                    break
+            continue
         used.add(episode)
-        items.append({"video": video, "season": season, "episode": episode})
+        items.append({"video": video, "videos": [video], "season": season, "episode": episode})
     if len(items) < 2:
         return []
     numbers = sorted(item["episode"] for item in items)
@@ -2034,16 +2045,24 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
             season = items[0]["season"]
             dest_dir = join_path(join_path(library, show), f"Season {season:02d}")
             for item in items:
-                sidecars = _pack_sidecars(files, item["video"])
-                # 字幕可能在 Subs、字幕这样的子目录里，按集数认。
-                subs = match_subtitles(files, item["video"], int(item.get("episode") or 0),
-                                       int(item.get("season") or 0))
-                known = {node.path for node in sidecars}
-                for node in subs:
-                    if node.path not in known:
-                        sidecars.append(node)
-                        known.add(node.path)
-                item["nodes"] = [item["video"], *sidecars]
+                nodes = []
+                subs = []
+                for video in item.get("videos") or [item["video"]]:
+                    sidecars = _pack_sidecars(files, video)
+                    # 字幕可能在 Subs、字幕这样的子目录里，按集数认。
+                    found = match_subtitles(files, video, int(item.get("episode") or 0),
+                                           int(item.get("season") or 0))
+                    known = {node.path for node in sidecars}
+                    for node in found:
+                        if node.path not in known:
+                            sidecars.append(node)
+                            known.add(node.path)
+                    nodes.append(video)
+                    nodes.extend(sidecars)
+                    for node in found:
+                        if node not in subs:
+                            subs.append(node)
+                item["nodes"] = nodes
                 item["subs"] = subs
             return {
                 "action": "move",
@@ -2129,29 +2148,39 @@ def _apply_strm(decision: dict, config: JobConfig, write: bool, cancel=None) -> 
 
 
 def _apply_strm_item(decision: dict, item: dict, config: JobConfig, write: bool, cancel=None) -> None:
-    """整包里的一集：单独写一个 strm。"""
-    video = item.get("video")
-    if video is None:
+    """整包里的一集：单独写一个 strm。同一集有多个版本时每个版本一个 strm。"""
+    videos = [video for video in (item.get("videos") or []) if video is not None]
+    if not videos and item.get("video") is not None:
+        videos = [item["video"]]
+    if not videos:
         item["strm_error"] = "没有视频"
         return
-    result = _write_strm_for(
-        decision,
-        config,
-        video,
-        int(item.get("season") or 0),
-        int(item.get("episode") or 0),
-        write=write,
-        cancel=cancel,
-    )
-    if result.get("strm"):
-        item["strm"] = result["strm"]
-    if result.get("strm_error"):
-        item["strm_error"] = result["strm_error"]
-    if result.get("strm_skipped"):
-        item["strm_skipped"] = result["strm_skipped"]
-    if result.get("strm_relative") and not result.get("strm_skipped"):
-        _apply_subtitles(decision, item.get("subs") or [], config,
-                         result["strm_relative"], write=write, cancel=cancel, item=item)
+    written = []
+    errors = []
+    for video in videos:
+        result = _write_strm_for(
+            decision,
+            config,
+            video,
+            int(item.get("season") or 0),
+            int(item.get("episode") or 0),
+            write=write,
+            cancel=cancel,
+        )
+        if result.get("strm"):
+            written.append(result["strm"])
+        if result.get("strm_error"):
+            errors.append(result["strm_error"])
+        if result.get("strm_skipped"):
+            item["strm_skipped"] = result["strm_skipped"]
+        if result.get("strm_relative") and not result.get("strm_skipped"):
+            _apply_subtitles(decision, item.get("subs") or [], config,
+                             result["strm_relative"], write=write, cancel=cancel, item=item)
+    if written:
+        item["strm"] = written[0]
+        item["strms"] = written
+    if errors:
+        item["strm_error"] = errors[0]
 
 
 def _apply_subtitles(decision: dict, subs: list, config: JobConfig, relative: str,

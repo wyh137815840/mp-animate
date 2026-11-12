@@ -290,6 +290,31 @@ class RealPackNameTest(unittest.TestCase):
         files = self._files(pack, ["Some Movie 2024 [1080p].mkv"])
         self.assertEqual(_pack_items(files, {"season": 1}, pack, files), [])
 
+    def test_ova_bracket_episode_numbers(self):
+        """OVA 整包里方括号里的集数也要认：…OVA IV][04][1080P][简体]"""
+        pack = "/离线下载/动漫/20261112/[八重樱字幕组][噬血狂袭OVAIV][01-04][1080P][简体]"
+        files = self._files(pack, [
+            "[八重樱字幕组][噬血狂袭OVAIV][Strike the Blood OVA IV][01][1080P][简体].mp4",
+            "[八重樱字幕组][噬血狂袭OVAIV][Strike the Blood OVA IV][02][1080P][简体].mp4",
+            "[八重樱字幕组][噬血狂袭OVAIV][Strike the Blood OVA IV][03][1080P][简体].mp4",
+            "[八重樱字幕组][噬血狂袭OVAIV][Strike the Blood OVA IV][04][1080P][简体].mp4",
+        ])
+        items = _pack_items(files, {"season": 1, "episode": 0}, pack, files)
+        self.assertEqual([item["episode"] for item in items], [1, 2, 3, 4])
+
+    def test_same_episode_twice_is_extra_version(self):
+        """同一集有两个版本（NC、13 END）时，整包照样拆，多的算另一个版本。"""
+        pack = "/离线下载/动漫/20261111/[Moozzi2] Mob Psycho 100 II - TV + SP"
+        names = [f"[Moozzi2] Mob Psycho 100 II - {i:02d} (BD 1920x1080 x.264-10Bit Flac).mkv"
+                 for i in range(1, 13)]
+        names.append("[Moozzi2] Mob Psycho 100 II - 13 (BD 1920x1080 x.264-10Bit Flac).mkv")
+        names.append("[Moozzi2] Mob Psycho 100 II - 13 END (BD 1920x1080 x.264-10Bit FLACx2).mkv")
+        files = self._files(pack, names)
+        items = _pack_items(files, {"season": 2, "episode": 0}, pack, files)
+        self.assertEqual([item["episode"] for item in items], list(range(1, 14)))
+        last = items[-1]
+        self.assertEqual(len(last["videos"]), 2)
+
     def test_special_episodes_are_not_split(self):
         """SP 特别篇不进正片。"""
         pack = "/离线下载/动漫/20261109/Re Zero [WebRip 1080p HEVC-10bit AAC ASSx2]"
