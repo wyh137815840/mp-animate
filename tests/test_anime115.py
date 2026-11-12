@@ -1248,6 +1248,18 @@ class CookiePanTest(unittest.TestCase):
         self.assertFalse(any("/folder/update" in call[1] for call in http.calls))
         self.assertTrue(any(call[1] == "https://webapi.115.com/files/add" for call in http.calls))
 
+    def test_aps_blocked_falls_back_to_open_api(self):
+        """aps 回 405 时换开放平台的列目录接口，不能整轮都超时。"""
+        http = _PageHttp({"11": [{"fid": "81", "fc": "1", "fn": "E01.mkv", "fs": 900, "pid": "11"}]}, block_aps=True)
+        pan = Pan115("UID=9_1", http=http, gap=0, client_factory=lambda _cookie: _FakeClient())
+        rows = pan.list_children("11")
+        self.assertEqual([row["fn"] for row in rows], ["E01.mkv"])
+        self.assertTrue(any("ufile/files" in call[1] for call in http.calls))
+        # 换过之后这一轮不再走 aps
+        before = len(http.calls)
+        pan.list_children("11")
+        self.assertFalse(any("natsort/files.php" in call[1] for call in http.calls[before:]))
+
     def test_unreadable_parent_is_not_created(self):
         http = _PageHttp({})
         http.status = 400
@@ -1413,7 +1425,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.49")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.50")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):
@@ -1503,16 +1515,19 @@ class _ScriptedHttp:
 class _PageHttp:
     """按 cid 返回目录行。files/add 依次用 posts；没有 posts 时把 add_after 当成已存在。"""
 
-    def __init__(self, pages):
+    def __init__(self, pages, block_aps=False):
         self.pages = {key: list(rows) for key, rows in pages.items()}
         self.calls = []
         self.posts = []
         self.add_after = None
         self.status = 200
+        self.block_aps = block_aps
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
-        if self.status != 200 and "natsort/files.php" in url:
+        if self.block_aps and "natsort/files.php" in url:
+            return _Resp({"state": False, "error": "列目录失败"}, status=405)
+        if self.status != 200 and self._is_listing(url):
             return _Resp({"state": False, "error": "列目录失败"}, status=self.status)
         if method == "POST" and url.endswith("/files/add"):
             if self.add_after and not self.posts:
@@ -1522,10 +1537,15 @@ class _PageHttp:
                 return _Resp({"state": False, "errno": 20004, "error": "该目录名称已存在。"})
             payload = self.posts.pop(0) if self.posts else {"state": True, "cid": "99"}
             return _Resp(payload)
-        if "natsort/files.php" in url:
+        if "natsort/files.php" in url or "ufile/files" in url:
             cid = str((kwargs.get("params") or {}).get("cid") or "")
             return _Resp({"state": True, "data": list(self.pages.get(cid, []))})
         return _Resp({"state": True, "data": []})
+
+    @staticmethod
+    def _is_listing(url):
+        """列目录的接口：aps 和它的两个备用接口。"""
+        return any(mark in url for mark in ("natsort/files.php", "ufile/files", "webapi.115.com/files"))
 
 
 class _FinishedClient:

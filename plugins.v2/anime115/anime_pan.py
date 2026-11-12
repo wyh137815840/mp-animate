@@ -10,6 +10,9 @@ from .anime_names import join_path, norm
 
 _APP = "https://proapi.115.com/android"
 _APS_LIST = "https://aps.115.com/natsort/files.php"
+# aps 被挡时的备用列目录接口
+_PRO_LIST = "https://proapi.115.com/android/2.0/ufile/files"
+_WEB_LIST = "https://webapi.115.com/files"
 _FS_MKDIR = "https://webapi.115.com/files/add"
 _WEB_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -18,6 +21,8 @@ _WEB_UA = (
 _PAGE = 500
 _RETRY_WAITS = (5, 20, 40)
 _RETRY_STATUS = {405, 429, 500, 502, 503, 504}
+# 列目录时 405 不重试：aps 对这个账号回 405 时重试也没用，直接换接口。
+_LIST_RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
 class Pan115:
@@ -27,6 +32,7 @@ class Pan115:
         self.cookie = cookie
         self.user_id = _uid(cookie)
         self._dirs = {"/": "0"}
+        self._list_url = _APS_LIST
         self._gap = gap
         self._last_call = 0.0
         self._lock = threading.Lock()
@@ -101,18 +107,44 @@ class Pan115:
         items = []
         offset = 0
         while True:
-            found = self._call("GET", "", url=_APS_LIST, params={
-                "cid": directory_id,
-                "limit": _PAGE,
-                "offset": offset,
-                "show_dir": 1,
-                "aid": 1,
-            })
+            found = self._list_page(directory_id, offset)
             page = [_from_aps(row, directory_id) for row in _items(found)]
             items.extend(page)
             if len(page) < _PAGE:
                 return items
             offset += _PAGE
+
+    def _list_page(self, directory_id: str, offset: int) -> dict:
+        """列一页目录。
+
+        aps.115.com 偶尔会对这个账号回 405（返回的是网页而不是数据），
+        这时换开放平台的列目录接口；换过之后这一轮都走新接口。
+        """
+        params = {
+            "cid": directory_id,
+            "limit": _PAGE,
+            "offset": offset,
+            "show_dir": 1,
+            "aid": 1,
+        }
+        if self._list_url != _APS_LIST:
+            return self._call("GET", "", url=self._list_url, params=params)
+        try:
+            return self._call("GET", "", url=_APS_LIST, params=params, retry_statuses=_LIST_RETRY_STATUS)
+        except RuntimeError as exc:
+            last = str(exc)
+            _log(f"动漫 115 列目录失败（aps），换开放平台接口：{exc}", level="warning")
+        for url in (_PRO_LIST, _WEB_LIST):
+            try:
+                found = self._call("GET", "", url=url, params=params, retry_statuses=_LIST_RETRY_STATUS)
+            except RuntimeError as exc:
+                last = str(exc)
+                _log(f"动漫 115 列目录失败（{url}）：{exc}", level="warning")
+                continue
+            self._list_url = url
+            _log(f"动漫 115 改用 {url} 列目录", level="info")
+            return found
+        raise RuntimeError(f"115 列目录失败：{directory_id}（{last}）")
 
     def move(self, file_id: str, directory_id: str) -> None:
         self._post("/files/move", {"ids": file_id, "to_cid": directory_id, "user_id": self.user_id})
@@ -186,9 +218,10 @@ class Pan115:
     def _post(self, path: str, data: dict) -> dict:
         return self._call("POST", path, data=data)
 
-    def _call(self, method: str, path: str, url: str = "", **kwargs) -> dict:
+    def _call(self, method: str, path: str, url: str = "", retry_statuses=None, **kwargs) -> dict:
         target = url or _APP + path
         label = path or target
+        statuses = _RETRY_STATUS if retry_statuses is None else set(retry_statuses)
         last = ""
         for wait in (0, *_RETRY_WAITS):
             if wait:
@@ -202,7 +235,7 @@ class Pan115:
                     continue
                 raise
             status = getattr(response, "status_code", 200)
-            if status in _RETRY_STATUS:
+            if status in statuses:
                 last = f"115 {label} 返回 {status}"
                 continue
             return _checked(response, label)
