@@ -116,9 +116,10 @@ class StrmTemplateTest(unittest.TestCase):
 
     def test_package_version_is_1_0_42(self):
         package = json.loads((Path(__file__).resolve().parents[1] / "package.v2.json").read_text(encoding="utf-8"))
-        self.assertEqual(package["Anime115"]["version"], "1.0.43")
+        self.assertEqual(package["Anime115"]["version"], "1.0.44")
         self.assertIn("按长度排序", package["Anime115"]["history"]["v1.0.42"])
         self.assertIn("蓝光大包", package["Anime115"]["history"]["v1.0.43"])
+        self.assertIn("zh-CN", package["Anime115"]["history"]["v1.0.44"])
         self.assertIn("短形式", package["Anime115"]["history"]["v1.0.41"])
         self.assertIn("别名候选", package["Anime115"]["history"]["v1.0.40"])
         self.assertIn("别名搜索", package["Anime115"]["history"]["v1.0.39"])
@@ -143,7 +144,7 @@ class StrmTemplateTest(unittest.TestCase):
         self.assertIn("fs_mkdir", package["Anime115"]["history"]["v1.0.20"])
         self.assertIn("每 30 分钟", package["Anime115"]["history"]["v1.0.19"])
         text = (_ROOT / "__init__.py").read_text(encoding="utf-8")
-        self.assertIn('plugin_version = "1.0.43"', text)
+        self.assertIn('plugin_version = "1.0.44"', text)
         self.assertIn("内网播放地址", text)
         self.assertIn("外网播放地址", text)
 

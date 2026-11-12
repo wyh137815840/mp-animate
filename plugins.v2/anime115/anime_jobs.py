@@ -24,6 +24,7 @@ from .anime_names import Show, _fold_name, join_path, name_of, norm, parent_path
 from .anime_playurl import PlayUrlError, play_url_for_strm
 from .anime_strm import commit_strm, pickcode_of, strm_relative
 from .anime_subs import (
+    SIDECAR_SUFFIXES,
     fetch_bytes,
     is_subtitle_dir,
     is_subtitle_name,
@@ -2112,6 +2113,11 @@ def _apply_subtitles(decision: dict, subs: list, config: JobConfig, relative: st
     for node in subs:
         if _event_set(cancel):
             return
+        suffix = _suffix(node.name)
+        if suffix not in SIDECAR_SUFFIXES:
+            # Emby 挂不上 sup、sub 这些格式，写出去也没用
+            target.setdefault("sub_skipped", f"{node.name}：Emby 不认 {suffix}")
+            continue
         code = pickcode_of(node)
         if not code:
             target["sub_error"] = "字幕缺少 pickcode"

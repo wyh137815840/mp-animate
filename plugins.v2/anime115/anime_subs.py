@@ -15,6 +15,8 @@ from .anime_names import parse_episode
 
 # 能直接当字幕用的扩展名
 SUB_SUFFIXES = {".ass", ".srt", ".ssa", ".vtt", ".sup", ".sub"}
+# Emby 实测认的外挂字幕格式。sup、sub 不在里面，写出去也挂不上。
+SIDECAR_SUFFIXES = {".ass", ".srt", ".ssa", ".vtt"}
 # 常见的字幕目录名
 SUB_DIR_NAMES = {
     "subs", "sub", "subtitle", "subtitles", "字幕", "字幕文件", "ass", "srt",
@@ -133,13 +135,33 @@ def _parent(path: str) -> str:
     return text.rsplit("/", 1)[0]
 
 
+def language_suffix(name: str) -> str:
+    """字幕的语言码。
+
+    Emby 认同目录同主干名的外挂字幕，但没语言码时客户端不一定自动选中文，
+    所以写的时候补上 zh-CN；文件名里写明繁体的按繁体算。
+    """
+    text = (name or "").lower()
+    if any(word in text for word in ("繁体", "繁體", "big5", "cht", "繁")):
+        return "zh-TW"
+    return "zh-CN"
+
+
 def subtitle_relative(strm_relative: str, subtitle_name: str) -> str:
-    """字幕要放在 .strm 旁边，名字只换扩展名。"""
+    """字幕要放在 .strm 旁边，名字只换扩展名。
+
+    Emby 认的是「同目录、同主干名」：主干要一模一样，扩展名随意，
+    中间可以再带一个语言码。
+    """
     relative = (strm_relative or "").strip()
     suffix = suffix_of(subtitle_name) or ".ass"
     head, _, _tail = relative.rpartition("/")
     stem = stem_of(relative.rsplit("/", 1)[-1])
-    name = f"{stem}{suffix}"
+    name = f"{stem}.{language_suffix(subtitle_name)}{suffix}"
+    if len(name.encode("utf-8")) > 240:
+        room = 240 - len(f".{language_suffix(subtitle_name)}{suffix}".encode("utf-8"))
+        stem = stem.encode("utf-8")[: max(room, 0)].decode("utf-8", "ignore").rstrip()
+        name = f"{stem}.{language_suffix(subtitle_name)}{suffix}"
     return f"{head}/{name}" if head else name
 
 

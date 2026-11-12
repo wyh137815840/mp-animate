@@ -65,14 +65,19 @@ class MatchSubtitleTest(unittest.TestCase):
 
 class SidecarTest(unittest.TestCase):
     def test_relative_keeps_folder(self):
+        """Emby 认的是同目录同主干名，语言码让客户端自动选中文。"""
         relative = subtitle_relative("某剧/Season 01/某剧 - S01E01 - 原名.strm", "某剧 - S01E01 - 原名.ass")
-        self.assertEqual(relative, "某剧/Season 01/某剧 - S01E01 - 原名.ass")
+        self.assertEqual(relative, "某剧/Season 01/某剧 - S01E01 - 原名.zh-CN.ass")
+
+    def test_relative_traditional_subtitle(self):
+        relative = subtitle_relative("某剧/Season 01/原名.strm", "原名 [繁体].ass")
+        self.assertTrue(relative.endswith(".zh-TW.ass"))
 
     def test_write_sidecar(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
-            path = write_sidecar(tmp, "某剧/Season 01/某剧 - S01E01 - 原名.ass", b"text")
+            path = write_sidecar(tmp, "某剧/Season 01/某剧 - S01E01 - 原名.zh-CN.ass", b"text")
             self.assertTrue(Path(path).exists())
             self.assertEqual(Path(path).read_bytes(), b"text")
 
