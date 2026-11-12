@@ -65,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.40"
+    plugin_version = "1.0.41"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -1005,6 +1005,22 @@ class _Mp115:
         return U115Pan()._request_api("GET", "/open/offline/get_quota_info")
 
 
+def _short_keywords(show: Show) -> list[str]:
+    """订阅名里截出来的短形式。
+
+    MoviePilot 的订阅名常带一长串副标题（《才女的侍从 在满是高岭之花的…》），
+    动漫花园那边按短名收录，截一段去搜更容易命中。
+    """
+    keyword = (getattr(show, "keyword", "") or "").strip()
+    if not keyword:
+        return []
+    for sep in ("，", ",", "（", "(", "「", "『", "/", "：", ":"):
+        head = keyword.split(sep)[0].strip()
+        if len(head) >= 2 and head != keyword:
+            return [head]
+    return []
+
+
 def _search_aliases(show: Show) -> list[str]:
     """挑几个可能好用的别名。
 
@@ -1055,9 +1071,10 @@ def _entries_for(show: Show, cancel, gap: dict) -> list:
     gap["done"] = True
     torrents = _fetch_candidates(show.keyword, cancel)
     if len(torrents) < _ALIAS_SEARCH_THRESHOLD:
-        # 剧名搜到的太少时，用 TMDB 的别名再搜并合并（订阅名和花园标题常常对不上）。
+        # 剧名搜到的太少时，用「剧名的短形式」和 TMDB 的别名再搜并合并。
+        # 订阅名常常很长（《才女的侍从 在满是…》），花园那边按短名收录。
         known = {item.title for item in torrents}
-        for alias in _search_aliases(show):
+        for alias in _short_keywords(show) + _search_aliases(show):
             if _event_set(cancel):
                 return torrents
             _pause(cancel, 2)
