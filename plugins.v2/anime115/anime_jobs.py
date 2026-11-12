@@ -20,7 +20,7 @@ from .anime_call import (
 )
 from .anime_dmhy import Pick, SearchOptions, select_shows
 from .anime_flatten import Node, apply_proposals, propose
-from .anime_names import Show, _fold_name, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
+from .anime_names import Show, _fold_name, _has_episode_range, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
 from .anime_playurl import PlayUrlError, play_url_for_strm
 from .anime_strm import commit_strm, pickcode_of, strm_relative
 from .anime_subs import (
@@ -1904,6 +1904,41 @@ def _pack_episode(name: str) -> int:
     return 0
 
 
+# 整包里文件名末尾直接跟集数：Strike the Blood 23
+# 数字前面不能挨着字母（SP30、OVA2 这类特别篇不算正片集数），也不能挨着数字。
+_PACK_TRAILING_NUMBER = re.compile(r"(?<![0-9A-Za-z])(\d{1,3})\s*$")
+# 文件名里的方括号标签
+_PACK_TAGS = re.compile(r"[\[\(【][^\]\)】]*[\]\)】]")
+
+
+def _pack_episode_full(name: str) -> int:
+    """整包里文件名的集数。通用解析认不出的写法在这里兜底。
+
+    - 「24 END」「[12END]」这类
+    - 标题后面直接跟集数：Strike the Blood 23
+    - OVA、SP 的文件名：通用解析一律不收，但整包里它们同样是这一集的内容
+    """
+    text = name or ""
+    episode = _pack_episode(text)
+    if episode > 0:
+        return episode
+    parsed = parse_episode(text)
+    if parsed:
+        return int(parsed[1])
+    if _has_episode_range(text):
+        # 01-12 这种是一整个范围文件，不是单独一集
+        return 0
+    stripped = _PACK_TAGS.sub(" ", text)
+    if "." in stripped:
+        stripped = stripped.rsplit(".", 1)[0]
+    matched = _PACK_TRAILING_NUMBER.search(stripped.strip())
+    if matched:
+        number = int(matched.group(1))
+        if 0 < number < 1000:
+            return number
+    return 0
+
+
 def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node]) -> list[dict]:
     """整包：按每个视频自己文件名里的集数，拆成一集一项。
 
@@ -1917,12 +1952,9 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
     for video in videos:
         parsed = parse_episode(video.name)
         explicit = _explicit_season(video.name)
-        if parsed is not None:
-            episode = parsed[1]
-        else:
-            episode = _pack_episode(video.name)
+        episode = _pack_episode_full(video.name)
         if episode <= 0:
-            # 认不出集数的文件（NCOP、SP 之类）不参与拆分，留在包里
+            # 认不出集数的文件（NCOP 之类）不参与拆分，留在包里
             continue
         if explicit is not None:
             explicit_seasons.add(explicit)

@@ -262,6 +262,34 @@ class RealPackNameTest(unittest.TestCase):
         items = _pack_items(files, {"season": 1, "episode": 24}, pack, files)
         self.assertEqual([item["episode"] for item in items], [22, 23, 24])
 
+    def test_bare_number_episode_names(self):
+        """标题后面直接跟集数（Strike the Blood 23）也要拆得开。"""
+        pack = "/离线下载/动漫/20261109/Strike the Blood [BD 1920x1080 HEVC-10bit AAC]"
+        files = self._files(pack, [
+            "Strike the Blood 22 [BD 1920x1080 HEVC-10bit AAC ASSx2].mkv",
+            "Strike the Blood 23 [BD 1920x1080 HEVC-10bit AAC ASSx2].mkv",
+            "Strike the Blood 24 END [BD 1920x1080 HEVC-10bit AAC ASSx2].mkv",
+        ])
+        items = _pack_items(files, {"season": 1, "episode": 24}, pack, files)
+        self.assertEqual([item["episode"] for item in items], [22, 23, 24])
+
+    def test_ova_pack_files_are_split(self):
+        """OVA 整包里的文件同样是一集一集。"""
+        pack = "/离线下载/动漫/20261110/[Beatrice-Raws] Strike the Blood III [BDRip 1920x1080 HEVC FLAC]"
+        files = self._files(pack, [
+            "[Beatrice-Raws] Strike the Blood OVA - 09 [BDRip 1920x1080 HEVC FLAC].mkv",
+            "[Beatrice-Raws] Strike the Blood OVA - 10 [BDRip 1920x1080 HEVC FLAC].mkv",
+        ])
+        items = _pack_items(files, {"season": 3, "episode": 0}, pack, files)
+        self.assertEqual([item["episode"] for item in items], [9, 10])
+        self.assertTrue(all(item["season"] == 3 for item in items))
+
+    def test_year_is_not_an_episode(self):
+        """2024 这种年份不是集数。"""
+        pack = "/离线下载/动漫/20261110/Some Movie [1080p]"
+        files = self._files(pack, ["Some Movie 2024 [1080p].mkv"])
+        self.assertEqual(_pack_items(files, {"season": 1}, pack, files), [])
+
     def test_special_episodes_are_not_split(self):
         """SP 特别篇不进正片。"""
         pack = "/离线下载/动漫/20261109/Re Zero [WebRip 1080p HEVC-10bit AAC ASSx2]"
