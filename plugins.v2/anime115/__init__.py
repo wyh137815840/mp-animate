@@ -42,9 +42,6 @@ from .anime_names import Show, _fold_name, norm, parse_watchlist
 from .anime_subscribe import load_mp_subscriptions, shows_from_subscriptions
 from .anime_tmdb import live_bounds, shanghai_today
 
-# 剧名短于这个长度才去查 TMDB 别名
-_ALIAS_LOOKUP_MAX_LEN = 4
-
 _FORM_NOTE = (
     "先保持「只预览」。115 Cookie 含 UID= 时，本轮离线、整理和摊平都走这条 Cookie。"
     "留空或没有 UID= 时使用存储 ID 对应的已登录 115，默认 u115。"
@@ -65,7 +62,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.36"
+    plugin_version = "1.0.37"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -668,9 +665,6 @@ class Anime115(_PluginBase):
         def lookup(show):
             if show is None or not getattr(show, "tmdb_id", None):
                 return []
-            # 只有短剧名才可能被更长的同名剧盖住，长剧名不用查别名，省下 TMDB 请求。
-            if len(_fold_name(getattr(show, "keyword", "") or "")) > _ALIAS_LOOKUP_MAX_LEN:
-                return []
             key_text = str(show.tmdb_id)
             if key_text not in titles:
                 try:
@@ -1013,6 +1007,21 @@ def _entries_for(show: Show, cancel, gap: dict) -> list:
         return []
     gap["done"] = True
     torrents = parse_rss(fetch_rss(show.keyword))
+    if not torrents:
+        # 用剧名搜不到时，换 TMDB 的别名再搜一次（订阅名和花园标题常常对不上）。
+        for alias in list(getattr(show, "extra_aliases", None) or [])[:2]:
+            if _event_set(cancel):
+                return []
+            _pause(cancel, 2)
+            if _event_set(cancel):
+                return []
+            alias_text = str(alias).strip()
+            if not alias_text or alias_text == show.keyword:
+                continue
+            torrents = parse_rss(fetch_rss(alias_text))
+            if torrents:
+                logger.info(f"动漫 115 {show.keyword} 用别名 {alias_text} 搜到 {len(torrents)} 条")
+                break
     if _event_set(cancel) or all(item.size for item in torrents):
         return torrents
     _pause(cancel, 2)
