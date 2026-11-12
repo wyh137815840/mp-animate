@@ -116,6 +116,29 @@ class OwnedIndexTest(unittest.TestCase):
         self.assertIs(owned.has(pick), False)
 
 
+class PackOwnedTest(unittest.TestCase):
+    """整包：包里还缺集就还要下，不能只看第一集。"""
+
+    def _session(self):
+        return FakeSession({
+            "/动漫": [_dir("/动漫/杜鹃的婚约", "杜鹃的婚约")],
+            "/动漫/杜鹃的婚约": [_dir("/动漫/杜鹃的婚约/Season 01", "Season 01")],
+            "/动漫/杜鹃的婚约/Season 01": [
+                _file("/动漫/杜鹃的婚约/Season 01/杜鹃的婚约 - S01E01 - x.strm", "杜鹃的婚约 - S01E01 - x.strm", 10),
+            ],
+        })
+
+    def test_pack_with_missing_episode_is_not_owned(self):
+        owned = _OwnedIndex(self._session(), JobConfig(library_root="/动漫"))
+        pick = types.SimpleNamespace(show="杜鹃的婚约", season=1, episode=1, pack=(1, 24))
+        self.assertIs(owned.has(pick), False)
+
+    def test_pack_fully_in_library_is_owned(self):
+        owned = _OwnedIndex(self._session(), JobConfig(library_root="/动漫"))
+        pick = types.SimpleNamespace(show="杜鹃的婚约", season=1, episode=1, pack=(1, 1))
+        self.assertIs(owned.has(pick), True)
+
+
 class DuplicateFolderTest(unittest.TestCase):
     def test_year_variant_folder_is_also_checked(self):
         session = FakeSession({

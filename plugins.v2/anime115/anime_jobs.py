@@ -1201,6 +1201,10 @@ class _OwnedIndex:
             return False
         season = int(getattr(pick, "season", 0) or 0)
         episode = int(getattr(pick, "episode", 0) or 0)
+        span = getattr(pick, "pack", None) or None
+        if span and int(span[1]) > int(span[0]):
+            # 整包：包里还缺集就还值得下，只看第一集会把整包误判成已有
+            return self._pack_missing(pick, folders, season, int(span[0]), int(span[1]))
         if season <= 0 or episode <= 0:
             return None
         unknown = False
@@ -1215,6 +1219,33 @@ class _OwnedIndex:
             if episode in episodes:
                 return True
         return None if unknown else False
+
+    def _pack_missing(self, pick, folders: list[str], season: int, first: int, last: int) -> bool | None:
+        """整包里还缺集吗？缺就还值得下（返回 False=没有，即不已有）。
+
+        库里已经有这一段里的每一集才算已有；缺一集就还要下。
+        """
+        if season <= 0 or first <= 0 or last < first:
+            return None
+        missing = False
+        unknown = False
+        for folder in folders:
+            key = (folder, season)
+            if key not in self._episodes:
+                self._episodes[key] = self._load_episodes(folder, season)
+            episodes = self._episodes[key]
+            if episodes is None:
+                unknown = True
+                continue
+            for number in range(first, last + 1):
+                if number not in episodes:
+                    missing = True
+                    break
+            if missing:
+                break
+        if unknown:
+            return None
+        return not missing
 
     def _candidate_folders(self, show: str) -> list[str]:
         """同名目录和「剧名 (年份)」目录都算。库里有重复目录时取并集，避免只查空目录就放行。"""

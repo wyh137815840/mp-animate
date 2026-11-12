@@ -177,7 +177,7 @@ class OwnedSessionTest(unittest.TestCase):
 class VersionTest(unittest.TestCase):
     def test_package_and_history(self):
         package = json.loads((Path(__file__).resolve().parents[1] / "package.v2.json").read_text(encoding="utf-8"))
-        self.assertEqual(package["Anime115"]["version"], "1.0.48")
+        self.assertEqual(package["Anime115"]["version"], "1.0.49")
         self.assertIn("按长度排序", package["Anime115"]["history"]["v1.0.42"])
         self.assertIn("蓝光大包", package["Anime115"]["history"]["v1.0.43"])
         self.assertIn("zh-CN", package["Anime115"]["history"]["v1.0.44"])
@@ -185,7 +185,8 @@ class VersionTest(unittest.TestCase):
         self.assertIn("风控", package["Anime115"]["history"]["v1.0.46"])
         self.assertIn("整包拆分", package["Anime115"]["history"]["v1.0.47"])
         self.assertIn("多版本", package["Anime115"]["history"]["v1.0.48"])
-        self.assertEqual(_PLUGIN.Anime115.plugin_version, "1.0.48")
+        self.assertIn("整包", package["Anime115"]["history"]["v1.0.49"])
+        self.assertEqual(_PLUGIN.Anime115.plugin_version, "1.0.49")
 
 
 if __name__ == "__main__":
