@@ -65,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.30"
+    plugin_version = "1.0.31"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -504,8 +504,12 @@ class Anime115(_PluginBase):
             })
             payload["progress"] = self._progress.get("progress")
             payload["state"] = self._progress.get("state")
-            self.save_data("last_run", payload)
-            self._push_history(payload)
+            try:
+                self.save_data("last_run", payload)
+                self._push_history(payload)
+            except Exception as exc:
+                # 记录失败不能把已经做完的活判成失败
+                logger.warning(f"动漫 115 {kind} 结果落库失败：{exc}")
             self._announce(payload)
             detail = payload.get("error") or "完成"
             note = payload.get("strm_error") or ""

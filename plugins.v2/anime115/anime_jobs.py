@@ -2118,7 +2118,7 @@ def run_split(session, config: JobConfig, limit: str = "", report=None) -> dict:
                 if items_item is None:
                     continue
                 item, done, bad = items_item
-                items.append(item)
+                items.append(_public_split(item))
                 moved += done
                 failed += bad
     return {"ok": True, "items": items, "moved": moved, "failed": failed, "dry_run": config.dry_run}
@@ -2230,6 +2230,27 @@ def _season_dir_number(name: str) -> int:
     if not matched:
         return 0
     return int(matched.group(1))
+
+
+def _public_split(decision: dict) -> dict:
+    """拆包记录要能存进数据库，不能带着文件对象。"""
+    hidden = {"nodes", "items", "strm_url", "strm_relative"}
+    record = {key: value for key, value in decision.items() if key not in hidden}
+    episodes = []
+    for item in decision.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        episodes.append({
+            "episode": item.get("episode"),
+            "season": item.get("season"),
+            "name": getattr(item.get("video"), "name", ""),
+            "strm": item.get("strm"),
+            "error": item.get("error") or item.get("strm_error"),
+            "skipped": item.get("skipped") or item.get("strm_skipped"),
+        })
+    if episodes:
+        record["episodes"] = episodes
+    return record
 
 
 def _public_move(decision: dict) -> dict:
