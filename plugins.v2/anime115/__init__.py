@@ -62,7 +62,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.37"
+    plugin_version = "1.0.38"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -997,6 +997,20 @@ class _Mp115:
         return U115Pan()._request_api("GET", "/open/offline/get_quota_info")
 
 
+def _fetch_candidates(keyword: str, cancel) -> list:
+    """拉一次动漫花园。失败重试一次；还不行就当这部剧没有候选，不拖垮整轮。"""
+    for attempt in range(2):
+        if _event_set(cancel):
+            return []
+        try:
+            return parse_rss(fetch_rss(keyword))
+        except Exception as exc:
+            logger.info(f"动漫 115 拉取 {keyword} 失败（第 {attempt + 1} 次）：{type(exc).__name__}")
+            if attempt == 0:
+                _pause(cancel, 3)
+    return []
+
+
 def _entries_for(show: Show, cancel, gap: dict) -> list:
     """每部剧查一次 RSS。体积还没有时再查列表页。相邻请求至少隔 2 秒。"""
     if _event_set(cancel):
@@ -1006,7 +1020,7 @@ def _entries_for(show: Show, cancel, gap: dict) -> list:
     if _event_set(cancel):
         return []
     gap["done"] = True
-    torrents = parse_rss(fetch_rss(show.keyword))
+    torrents = _fetch_candidates(show.keyword, cancel)
     if not torrents:
         # 用剧名搜不到时，换 TMDB 的别名再搜一次（订阅名和花园标题常常对不上）。
         for alias in list(getattr(show, "extra_aliases", None) or [])[:2]:
@@ -1018,7 +1032,7 @@ def _entries_for(show: Show, cancel, gap: dict) -> list:
             alias_text = str(alias).strip()
             if not alias_text or alias_text == show.keyword:
                 continue
-            torrents = parse_rss(fetch_rss(alias_text))
+            torrents = _fetch_candidates(alias_text, cancel)
             if torrents:
                 logger.info(f"动漫 115 {show.keyword} 用别名 {alias_text} 搜到 {len(torrents)} 条")
                 break
