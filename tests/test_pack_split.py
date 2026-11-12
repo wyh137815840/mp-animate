@@ -120,10 +120,21 @@ class PackItemTest(unittest.TestCase):
         ]
         self.assertEqual(_pack_items(files, {"season": 1}, "Show 01-02", files), [])
 
-    def test_other_season_file_is_not_a_pack(self):
+    def test_file_stated_season_wins(self):
+        """文件自己写明是第 2 季就按第 2 季拆，订阅写的是第 1 季也不拦。"""
         files = [
             _video(PACK, "Show S2 - 01 [1080p].mkv"),
             _video(PACK, "Show S2 - 02 [1080p].mkv"),
+        ]
+        items = _pack_items(files, {"season": 1}, "Show", files)
+        self.assertEqual([item["season"] for item in items], [2, 2])
+        self.assertEqual([item["episode"] for item in items], [1, 2])
+
+    def test_conflicting_seasons_are_refused(self):
+        """文件里写着不同的季，不敢拆。"""
+        files = [
+            _video(PACK, "Show S01E01 [1080p].mkv"),
+            _video(PACK, "Show S02E02 [1080p].mkv"),
         ]
         self.assertEqual(_pack_items(files, {"season": 1}, "Show", files), [])
 
@@ -227,6 +238,26 @@ class RealPackNameTest(unittest.TestCase):
     def _files(self, pack, names):
         return [_video(pack, name) for name in names]
 
+    def test_end_style_episode_numbers(self):
+        """「24 END」「[12END]」这种写法也要认得出集数。"""
+        pack = "/离线下载/动漫/20261109/Strike the Blood [BD 1920x1080 HEVC-10bit AAC]"
+        files = self._files(pack, [
+            "Strike the Blood 22 END [BD 1920x1080 HEVC-10bit AAC ASSx2].mkv",
+            "Strike the Blood 23 END [BD 1920x1080 HEVC-10bit AAC ASSx2].mkv",
+            "Strike the Blood 24 END [BD 1920x1080 HEVC-10bit AAC ASSx2].mkv",
+        ])
+        items = _pack_items(files, {"season": 1, "episode": 24}, pack, files)
+        self.assertEqual([item["episode"] for item in items], [22, 23, 24])
+
+    def test_special_episodes_are_not_split(self):
+        """SP 特别篇不进正片。"""
+        pack = "/离线下载/动漫/20261109/Re Zero [WebRip 1080p HEVC-10bit AAC ASSx2]"
+        files = self._files(pack, [
+            "[DMG] Re Zero kara Hajimeru Isekai Seikatsu - SP30 [WebRip 1080p HEVC-10bit AAC ASSx2].mkv",
+            "[DMG] Re Zero kara Hajimeru Isekai Seikatsu - SP31 [WebRip 1080p HEVC-10bit AAC ASSx2].mkv",
+        ])
+        self.assertEqual(_pack_items(files, {"season": 1}, pack, files), [])
+
     def test_season_marked_pack(self):
         pack = "/离线下载/动漫/20261109/[BDrip] Strike The Blood Final [JP][7³ACG]"
         files = self._files(pack, [
@@ -260,13 +291,15 @@ class RealPackNameTest(unittest.TestCase):
         self.assertEqual([item["episode"] for item in items], [1, 2])
         self.assertTrue(all(item["season"] == 2 for item in items))
 
-    def test_file_of_other_season_is_refused(self):
+    def test_file_of_other_season_uses_its_own_season(self):
+        """文件写的是第 2 季，就进第 2 季，不会塞进第 1 季。"""
         pack = "/离线下载/动漫/20261109/Show [01-12]"
         files = self._files(pack, [
             "Show S02E01 [1080p].mkv",
             "Show S02E02 [1080p].mkv",
         ])
-        self.assertEqual(_pack_items(files, {"season": 1}, pack, files), [])
+        items = _pack_items(files, {"season": 1}, pack, files)
+        self.assertEqual([item["season"] for item in items], [2, 2])
 
 
 class PublicRecordTest(unittest.TestCase):

@@ -1819,6 +1819,23 @@ def _explicit_season(name: str) -> int | None:
     return explicit_season(name)
 
 
+# 整包里常见的集数写法：[12END]、24 END。通用解析认不出这些，拆包时兜一下。
+_PACK_EPISODE_BRACKET = re.compile(r"\[(\d{1,3})\s*(?:END|E)\]", re.IGNORECASE)
+_PACK_EPISODE_TRAILING = re.compile(r"(?<![\d.\-])(\d{1,2})\s+END\b", re.IGNORECASE)
+
+
+def _pack_episode(name: str) -> int:
+    """整包里的集数兜底。认不出就返回 0。"""
+    text = name or ""
+    matched = _PACK_EPISODE_BRACKET.search(text)
+    if matched:
+        return int(matched.group(1))
+    matched = _PACK_EPISODE_TRAILING.search(text)
+    if matched:
+        return int(matched.group(1))
+    return 0
+
+
 def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node]) -> list[dict]:
     """整包：按每个视频自己文件名里的集数，拆成一集一项。
 
@@ -1826,35 +1843,39 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
     要求：每个视频都有集数、互不重复、连号、季与包一致。
     """
     season = int(task.get("season") or 0)
-    pack_seasons = _pack_seasons(pack_name or "")
-    if len(pack_seasons) == 1:
-        season = next(iter(pack_seasons))
     # 每个文件自己写明的季号。parse_episode 认不出季时会默认第 1 季，不能拿它当依据。
     explicit_seasons = set()
+    parsed_items = []
     for video in videos:
         parsed = parse_episode(video.name)
-        if parsed is None:
-            return []
         explicit = _explicit_season(video.name)
+        if parsed is not None:
+            episode = parsed[1]
+        else:
+            episode = _pack_episode(video.name)
+        if episode <= 0:
+            # 认不出集数的文件（NCOP、SP 之类）不参与拆分，留在包里
+            continue
         if explicit is not None:
             explicit_seasons.add(explicit)
-    if not season and len(explicit_seasons) == 1:
-        season = next(iter(explicit_seasons))
-    if season <= 0:
-        return []
+        parsed_items.append((video, episode, explicit))
     if len(explicit_seasons) > 1:
         # 文件里写着不同的季，不敢拆
         return []
+    if len(explicit_seasons) == 1:
+        # 文件自己说是第几季就按它来：订阅的季和包的实际季可能不是一回事
+        season = next(iter(explicit_seasons))
+    else:
+        pack_seasons = _pack_seasons(pack_name or "")
+        if len(pack_seasons) == 1:
+            season = next(iter(pack_seasons))
+    if season <= 0:
+        return []
     items = []
     used = set()
-    for video in videos:
-        parsed = parse_episode(video.name)
-        if parsed is None:
-            return []
-        episode = parsed[1]
+    for video, episode, explicit in parsed_items:
         if episode <= 0:
             return []
-        explicit = _explicit_season(video.name)
         if explicit is not None and explicit != season:
             # 文件写的是别的季，不敢拆
             return []
