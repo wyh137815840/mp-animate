@@ -29,9 +29,12 @@ from .anime_progress import advance, format_progress, format_state
 from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
 from .anime_flatten import Node
 from .anime_jobs import JobConfig, JobStopped, new_task, run_daily, run_flatten, run_organize, run_strm as write_library_strm
-from .anime_names import Show, norm, parse_watchlist
+from .anime_names import Show, _fold_name, norm, parse_watchlist
 from .anime_subscribe import load_mp_subscriptions, shows_from_subscriptions
 from .anime_tmdb import live_bounds, shanghai_today
+
+# 剧名短于这个长度才去查 TMDB 别名
+_ALIAS_LOOKUP_MAX_LEN = 4
 
 _FORM_NOTE = (
     "先保持「只预览」。115 Cookie 含 UID= 时，本轮离线、整理和摊平都走这条 Cookie。"
@@ -53,7 +56,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.28"
+    plugin_version = "1.0.29"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -567,6 +570,7 @@ class Anime115(_PluginBase):
             config,
             report=self._report,
         )
+        self._save_alias_cache()
         result["notes"] = skipped + (result.get("notes") or [])
         result["subscribes"] = [
             {"show": show.keyword, "tmdb_id": show.tmdb_id, "season": show.season}
@@ -592,7 +596,11 @@ class Anime115(_PluginBase):
                 rows = load_mp_subscriptions()
             except Exception as exc:
                 return {"error": f"读不到 MoviePilot 订阅：{exc}", "source": source, "skipped": []}
-            mp_shows, skipped = shows_from_subscriptions(rows, genres_of=self._genre_lookup())
+            mp_shows, skipped = shows_from_subscriptions(
+                rows,
+                genres_of=self._genre_lookup(),
+                aliases_of=self._alias_lookup(),
+            )
         manual = parse_watchlist(self._watchlist) if source in {"watchlist", "both"} else []
         if source == "watchlist":
             shows = manual
@@ -617,6 +625,53 @@ class Anime115(_PluginBase):
             return cache[tmdb_id]
 
         return lookup
+
+    def _alias_lookup(self):
+        """TMDB 别名，用来分辨同名别的剧。取不到就当没有别名。
+
+        一天取一次，缓存在插件数据里。
+        """
+        from .anime_tmdb import alt_titles, configured_tmdb_key
+
+        key = configured_tmdb_key(self._tmdb_api_key)
+        if not key:
+            return lambda _tmdb_id: []
+        cache = self.get_data("tmdb_aliases") or {}
+        if not isinstance(cache, dict):
+            cache = {}
+        today = datetime.now().strftime("%Y-%m-%d")
+        if cache.get("day") != today:
+            cache = {"day": today, "titles": {}}
+        titles = cache.get("titles") or {}
+
+        def lookup(show):
+            if show is None or not getattr(show, "tmdb_id", None):
+                return []
+            # 只有短剧名才可能被更长的同名剧盖住，长剧名不用查别名，省下 TMDB 请求。
+            if len(_fold_name(getattr(show, "keyword", "") or "")) > _ALIAS_LOOKUP_MAX_LEN:
+                return []
+            key_text = str(show.tmdb_id)
+            if key_text not in titles:
+                try:
+                    titles[key_text] = alt_titles(int(show.tmdb_id), key)
+                except Exception as exc:
+                    logger.info(f"动漫 115 取 TMDB 别名失败 {show.tmdb_id}：{exc}")
+                    titles[key_text] = []
+            return titles.get(key_text) or []
+
+        self._alias_cache = (cache, titles)
+        return lookup
+
+    def _save_alias_cache(self) -> None:
+        """把今天取到的别名存下来。"""
+        cached = getattr(self, "_alias_cache", None)
+        if not cached:
+            return
+        cache, titles = cached
+        try:
+            self.save_data("tmdb_aliases", {"day": cache.get("day"), "titles": titles})
+        except Exception:
+            return
 
     def _mp_session(self):
         """每日离线走 MoviePilot 已登录的 115，不建 P115Client。"""

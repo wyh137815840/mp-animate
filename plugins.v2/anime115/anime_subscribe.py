@@ -22,14 +22,19 @@ def load_mp_subscriptions() -> list[dict]:
     return [_row(item) for item in rows]
 
 
-def shows_from_subscriptions(rows, genres_of=None) -> tuple[list[Show], list[dict]]:
-    """留下会去搜 dmhy 的动漫。其余每条一个跳过原因。"""
+def shows_from_subscriptions(rows, genres_of=None, aliases_of=None) -> tuple[list[Show], list[dict]]:
+    """留下会去搜 dmhy 的动漫。其余每条一个跳过原因。
+
+    aliases_of 可以给 TMDB 别名，用来分辨同名别的剧。
+    """
     shows = []
     notes = []
     seen = set()
     for raw in rows or []:
         row = raw if isinstance(raw, dict) else _row(raw)
         show, reason = classify_subscription(row, genres_of)
+        if show is not None and aliases_of is not None:
+            show.extra_aliases = list(aliases_of(show) or [])
         name = str(row.get("name") or row.get("keyword") or "")
         if show is None:
             notes.append({"show": name, "title": "", "reason": reason})

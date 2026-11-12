@@ -160,6 +160,32 @@ def tv_genre_ids(tv_id: int, api_key: str) -> list[int] | None:
     return genre_ids_in(payload)
 
 
+def alt_titles(tv_id: int, api_key: str) -> list[str]:
+    """这部剧在各语言下的别名。用来判断标题到底是哪一部剧。
+
+    《死神》的别名里有 BLEACH、千年血战篇；同名别的剧没有这些。
+    """
+    titles: set[str] = set()
+    for path in (f"/3/tv/{int(tv_id)}/alternative_titles", f"/3/tv/{int(tv_id)}/translations"):
+        payload = _fetch_json(path, {}, api_key)
+        if not payload:
+            continue
+        for item in payload.get("results") or []:
+            if isinstance(item, dict) and item.get("title"):
+                titles.add(str(item["title"]))
+        translations = payload.get("translations")
+        if isinstance(translations, dict):
+            translations = list(translations.values())
+        for item in translations or []:
+            if not isinstance(item, dict):
+                continue
+            data = item.get("data") or {}
+            for key in ("title", "name"):
+                if data.get(key):
+                    titles.add(str(data[key]))
+    return sorted(titles)
+
+
 def configured_tmdb_key(plugin_key: str = "") -> str:
     """插件密钥优先，否则用 MoviePilot 的 TMDB_API_KEY。"""
     return (plugin_key or "").strip() or _settings_key()

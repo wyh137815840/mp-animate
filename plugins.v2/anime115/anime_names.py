@@ -11,25 +11,9 @@ _SEASON_WORD = {
     "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
     "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
 }
-# 繁体到简体，只收简繁成对且不会改成另一个常用字的。用来让「探险家」对上「探險家」。
-_HANT_HANS_PAIRS = (
-    "險险", "學学", "對对", "嬌娇", "東东", "國国", "門门", "開开", "關关", "長长",
-    "電电", "視视", "網网", "語语", "話话", "書书", "畫画", "後后", "從从", "為为",
-    "時时", "間间", "會会", "來来", "這这", "個个", "們们", "說说", "還还", "過过",
-    "發发", "現现", "實实", "與与", "無无", "愛爱", "親亲", "見见", "覺觉", "讓让",
-    "請请", "謝谢", "點点", "頭头", "題题", "風风", "飛飞", "馬马", "體体", "條条",
-    "樂乐", "機机", "氣气", "漢汉", "滿满", "燈灯", "貓猫", "蟲虫", "衛卫", "裡里",
-    "裏里", "麼么", "樣样", "號号", "節节", "級级", "約约", "紅红", "線线", "練练",
-    "組组", "終终", "結结", "給给", "統统", "續续", "義义", "聲声", "聽听", "臉脸",
-    "興兴", "術术", "裝装", "複复", "觀观", "記记", "許许", "設设", "試试", "認认",
-    "識识", "譯译", "議议", "護护", "變变", "貝贝", "賽赛", "轉转", "輕轻", "邊边",
-    "達达", "運运", "選选", "適适", "醫医", "鐵铁", "陽阳", "隊队", "難难", "靈灵",
-    "靜静", "頁页", "預预", "領领", "飯饭", "鬥斗", "龍龙", "龜龟", "雲云", "鐘钟",
-)
-_HANT_TO_HANS = str.maketrans(
-    "".join(pair[0] for pair in _HANT_HANS_PAIRS),
-    "".join(pair[1] for pair in _HANT_HANS_PAIRS),
-)
+# 繁体到简体用内置的完整字表（4720 对常用字），见 anime_hant。
+# 早先只收了 120 对字，碧藍之海、葬送的芙莉蓮这类繁体发布名折不过来，整部剧会搜不到。
+from .anime_hant import HANT_TO_HANS as _HANT_TO_HANS
 
 
 @dataclass
@@ -42,6 +26,9 @@ class Show:
     tmdb_id: int | None = None
     airing: bool = False
     season: int | None = None
+    # TMDB 给的各语言别名。用来分辨同名别的剧：
+    # 《死神》的别名里有 BLEACH、千年血战篇，别剧没有。
+    extra_aliases: list[str] = field(default_factory=list)
 
     def names(self) -> list[str]:
         """搜索词和别名，长的排前面，避免短别名先命中。"""
@@ -131,13 +118,84 @@ def join_path(parent: str, name: str) -> str:
 
 
 def title_matches(title: str, show: Show) -> bool:
-    """标题里要出现搜索词或任一别名。简繁、星号和空格先折成同一种写法。"""
-    folded = _fold_name(title)
+    """标题里要出现搜索词或任一别名。简繁、星号和空格先折成同一种写法。
+
+    剧名只是另一个剧名的前缀时不算命中：「死神」不等于「死神少爷与黑女仆」。
+    后面接的是季标记（二期、S2、Season 2）或发行形态（全集、合集）时仍然算命中。
+    """
+    kept = _fold_keep(title)
+    folded_title = _fold_name(title)
     for name in show.names():
+        name_kept = _fold_keep(name)
+        if not name_kept:
+            continue
+        index = kept.find(name_kept)
+        if index >= 0:
+            rest = kept[index + len(name_kept):]
+            if _continues_longer_name(rest):
+                continue
+            return True
+        # 剧名里带符号（如「魔法★探险家」）时，用去掉分隔符的写法再找一次。
         folded_name = _fold_name(name)
-        if folded_name and folded_name in folded:
+        if folded_name and folded_name in folded_title:
+            return True
+    # 别名命中就认。TMDB 别名够特别（BLEACH、千年血战篇、ブリーチ），
+    # 能把本剧的续作名和同名别的剧分开。
+    for alias in show.extra_aliases:
+        folded_alias = _fold_name(alias)
+        if not folded_alias or folded_alias in _fold_name(show.keyword):
+            continue
+        if len(folded_alias) < 3 and not folded_alias.isascii():
+            continue
+        if folded_alias in folded_title:
             return True
     return False
+
+
+def _fold_keep(text: str) -> str:
+    """折叠繁简与大小写，但保留空格和分隔符：判断剧名边界要用。"""
+    return unicodedata.normalize("NFKC", text or "").casefold().translate(_HANT_TO_HANS)
+
+
+def _continues_longer_name(rest: str) -> bool:
+    """剧名后面紧跟着中文时，说明这是另一个更长的剧名。
+
+    「死神少爺與黑女僕」里的「死神」是另一部剧；
+    「死神 千年血战篇」「葬送的芙莉莲 / 葬送のフリーレン」是同一部。
+    """
+    if not rest:
+        return False
+    if _SEASON_AFTER_NAME.match(rest):
+        return False
+    if _BATCH_AFTER_NAME.match(rest):
+        return False
+    return _is_cjk(rest[0])
+
+
+# 剧名后面接这些词时仍是同一部剧：合集、全集、剧场版等是发行形态，不是另一部剧。
+_BATCH_AFTER_NAME = re.compile(
+    r"^(?:全集|合集|总集|總集|全季|完结|完結|剧场版|劇場版|电影版|電影版"
+    r"|特别篇|特別篇|特典|ova|sp|tv版|bd版|bdrip|webrip)"
+)
+
+# 剧名后面接这些东西时，仍算同一部剧：第二季、二期、Season 2、2nd Season、SP、OVA。
+_SEASON_AFTER_NAME = re.compile(
+    r"^(?:第?[一二三四五六七八九十0-9]{1,3}[季期]"
+    r"|s[0-9]{1,2}(?:e[0-9]{1,3})?"
+    r"|season[0-9]{1,2}"
+    r"|[0-9]{1,2}(?:st|nd|rd|th)season"
+    r"|sp[0-9]{1,2}?|ova)"
+)
+
+
+def _is_cjk(ch: str) -> bool:
+    """是不是汉字或假名。中文续接才可能是另一部更长的剧名。"""
+    code = ord(ch)
+    return (
+        0x3040 <= code <= 0x30FF
+        or 0x3400 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+    )
 
 
 def _fold_name(text: str) -> str:

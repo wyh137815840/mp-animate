@@ -1219,11 +1219,12 @@ def _scope_to_pack(session, task: dict, offline: dict, deadline: float = None) -
         return [], "", "没有离线目录", False
     wanted = _wanted_names(task, offline)
     file_id = _offline_file_id(offline)
+    episode = int(task.get("episode") or 0)
     children = _list_dir(session, inbox, deadline)
     if _folder_is_pack(inbox, wanted):
         files = _flatten_list(session, inbox, depth=3, deadline=deadline)
         return files, inbox, "", _pack_seen(session, inbox, children, files, deadline)
-    chosen, why = _choose_child(children, wanted, file_id)
+    chosen, why = _choose_child(children, wanted, file_id, episode)
     if why:
         return [], "", why, False
     if chosen is None and file_id:
@@ -1238,7 +1239,7 @@ def _scope_to_pack(session, task: dict, offline: dict, deadline: float = None) -
     if not dirs:
         videos = _real_videos(children)
         if len(videos) > 1 and wanted:
-            matched = _match_one(videos, wanted)
+            matched = _match_one(videos, wanted, episode)
             if len(matched) == 1:
                 return _file_and_sidecars(children, matched[0]), matched[0].path, "", True
         files = _flatten_list(session, inbox, depth=3, deadline=deadline)
@@ -1309,6 +1310,232 @@ def _offline_file_id(offline: dict) -> str:
     return ""
 
 
+# 115 上离线包的目录名用的是种子原名：字幕组原名、原剧名、原扩展名。
+# 动漫花园展示的标题是重命名后的：字幕组中文名、中文剧名、换过的标签。
+# 两边对不上时按「剧名核心词 + 集数」认包：只认同一部剧同一集，认不准就留在原地。
+_PACK_NOISE_WORDS = {
+    "1080p", "1080i", "2160p", "720p", "480p", "4k", "uhd", "fhd",
+    "x264", "x265", "h264", "h265", "hevc", "avc", "aac", "ac3", "flac",
+    "dts", "eac3", "opus", "mp4", "mkv", "avi", "wmv", "mov", "flv",
+    "web", "webrip", "webdl", "bdrip", "bluray", "bd", "hdtv", "dvd",
+    "dvdrip", "remux", "repack", "10bit", "8bit", "ma10p", "hdr", "sdr",
+    "ass", "srt", "ssa", "sub", "subs", "subtitle", "subtitles",
+    "softsub", "hardsub", "chs", "cht", "jp", "jpn", "chi", "gb", "big5",
+    "eng", "end", "fin", "v2", "v3", "rec", "uncencored", "cr", "baha",
+}
+_PACK_NOISE_RE = re.compile(
+    r"^(?:srt|ass|ssa|sub|webrip|webdl|bdrip|bluray|x26[45]|h26[45]|hevc"
+    r"|avc|aac|ac3|flac|ma10p|dts|opus|ddp?|10bit|8bit|1080p|720p)[a-z0-9]*$"
+)
+# 中文标签：简体双语、招募翻译、内嵌字幕这些。两边写法不同，不能当剧名。
+_PACK_CJK_NOISE = (
+    "简体", "繁体", "简繁", "内嵌", "内封", "招募", "国语", "粤语",
+    "日语", "中字", "特效", "时轴", "急招", "修复", "重制",
+)
+_PACK_LATIN_RE = re.compile(r"[A-Za-z0-9]+")
+_PACK_CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]+")
+_PACK_SE_RE = re.compile(r"[Ss]\d{1,2}\s*[Ee]\s*(\d{1,3})")
+_PACK_CN_EP_RE = re.compile(r"第\s*(\d{1,3})\s*[话話集]")
+_PACK_SEASON_CN_RE = re.compile(r"第\s*(\d{1,2})\s*[季期]")
+_PACK_SEASON_EN_RE = re.compile(r"season\s*(\d{1,2})", re.IGNORECASE)
+_PACK_SEASON_ORD_RE = re.compile(r"(\d{1,2})\s*(?:st|nd|rd|th)\s*season", re.IGNORECASE)
+_PACK_SEASON_NUM_RE = re.compile(r"(?<![a-z0-9])s(\d{1,2})(?![0-9])", re.IGNORECASE)
+_PACK_SEASON_ROMAN = {"ii": 2, "iii": 3, "iv": 4, "vi": 6, "vii": 7, "viii": 8}
+_PACK_RANGE_BRACKET_RE = re.compile(r"\[(\d{1,3})\s*[-–~]\s*(\d{1,3})[^\]]*\]")
+_PACK_RANGE_RE = re.compile(r"(?<![A-Za-z0-9])(\d{1,3})\s*[-–~]\s*(\d{1,3})(?![0-9A-Za-z])")
+_PACK_BRACKET_RE = re.compile(r"\[(\d{1,3})(?:\s*v\d+)?\]")
+_PACK_DASH_RE = re.compile(r"(?<![A-Za-z0-9])[-–]\s*(\d{1,3})(?:\s*v\d+)?(?![0-9A-Za-z])")
+
+
+def _pack_strip_ext(name: str) -> str:
+    """去掉视频或字幕的扩展名。"""
+    text = (name or "").strip()
+    suffix = _suffix(text)
+    if suffix in VIDEO_EXTS or suffix in SUB_EXTS:
+        return text[: -len(suffix)]
+    return text
+
+
+def _pack_words(name: str) -> tuple[set[str], set[str]]:
+    """名字切成词。拉丁字母数字算一个词，连续的汉字假名算一个词，汉字折成简体。"""
+    text = _pack_strip_ext(name)
+    latin = {chunk.lower() for chunk in _PACK_LATIN_RE.findall(text)}
+    cjk = set()
+    for chunk in _PACK_CJK_RE.findall(text):
+        folded = _fold_name(chunk)
+        if folded:
+            cjk.add(folded)
+    return latin, cjk
+
+
+def _pack_is_noise(token: str) -> bool:
+    """技术标签：分辨率、编码、来源、字幕语言。两边写法常常不同，不算剧名。"""
+    if not token:
+        return True
+    if token in _PACK_NOISE_WORDS:
+        return True
+    return bool(_PACK_NOISE_RE.match(token))
+
+
+def _pack_is_cjk_noise(chunk: str) -> bool:
+    return any(chunk.startswith(word) for word in _PACK_CJK_NOISE)
+
+
+def _pack_episodes(name: str) -> set[int]:
+    """名字里能看出来的集数。整包范围会展开成一片。"""
+    text = _pack_strip_ext(name)
+    found: set[int] = set()
+    for matched in _PACK_SE_RE.finditer(text):
+        found.add(int(matched.group(1)))
+    for matched in _PACK_CN_EP_RE.finditer(text):
+        found.add(int(matched.group(1)))
+    for matched in _PACK_RANGE_BRACKET_RE.finditer(text):
+        first, second = int(matched.group(1)), int(matched.group(2))
+        if 0 < first <= second:
+            found.update(range(first, second + 1))
+    for matched in _PACK_RANGE_RE.finditer(text):
+        first, second = int(matched.group(1)), int(matched.group(2))
+        if 0 < first < second:
+            found.update(range(first, second + 1))
+    for matched in _PACK_BRACKET_RE.finditer(text):
+        found.add(int(matched.group(1)))
+    for matched in _PACK_DASH_RE.finditer(text):
+        found.add(int(matched.group(1)))
+    return {value for value in found if 0 < value < 1000}
+
+
+def _pack_core(name: str) -> tuple[set[str], set[str]]:
+    """去掉扩展名、技术标签和集数，只剩剧名和字幕组这些内容词。"""
+    latin, cjk = _pack_words(name)
+    episodes = _pack_episodes(name)
+    latin = {
+        token for token in latin
+        if not _pack_is_noise(token) and not (token.isdigit() and int(token) in episodes)
+    }
+    cjk = {chunk for chunk in cjk if not _pack_is_cjk_noise(chunk)}
+    return latin, cjk
+
+
+def _pack_lead_words(name: str) -> set[str]:
+    """开头方括号里的字幕组。115 上是原名，花园上是中文名，不算剧名差异。"""
+    text = (name or "").strip()
+    if not text.startswith("["):
+        return set()
+    end = text.find("]")
+    if end < 0:
+        return set()
+    latin, cjk = _pack_words(text[1:end])
+    return latin | cjk
+
+
+def _pack_episode_relation(wanted: set[int], child: set[int], episode: int = 0) -> str:
+    """集数对不对得上。exact 是同一集，batch 是包含这一集的整包，空串是不对。"""
+    if wanted and child:
+        if wanted == child:
+            return "exact"
+        if wanted < child:
+            return "batch"
+        return ""
+    if child and not wanted:
+        if episode and episode in child:
+            return "exact"
+        return ""
+    if wanted and not child:
+        # 这一包看不出集数。只有整包标题才敢认，认不准就留在原地。
+        return "batch" if len(wanted) > 1 else ""
+    return "exact"
+
+
+def _pack_seasons(name: str) -> set[int]:
+    """名字里能看出来的季。第一季不算，认不出就当没有。"""
+    text = _pack_strip_ext(name)
+    found: set[int] = set()
+    for matched in _PACK_SEASON_CN_RE.finditer(text):
+        found.add(int(matched.group(1)))
+    for matched in _PACK_SEASON_EN_RE.finditer(text):
+        found.add(int(matched.group(1)))
+    for matched in _PACK_SEASON_ORD_RE.finditer(text):
+        found.add(int(matched.group(1)))
+    for matched in _PACK_SEASON_NUM_RE.finditer(text):
+        found.add(int(matched.group(1)))
+    latin, _cjk = _pack_words(text)
+    for token in latin:
+        if token in _PACK_SEASON_ROMAN:
+            found.add(_PACK_SEASON_ROMAN[token])
+    return {value for value in found if value > 1}
+
+
+def _pack_match(wanted: str, child: str, episode: int = 0) -> str:
+    """这一包是不是 wanted 说的那一部剧的那一集。
+
+    返回 exact（就是这一集）、batch（是包含这一集的整包），空串表示不像。
+    只认同一部剧同一季同一集：认不准就不认，宁可留在原地也不搬错。
+    """
+    wanted_eps = _pack_episodes(wanted)
+    child_eps = _pack_episodes(child)
+    relation = _pack_episode_relation(wanted_eps, child_eps, episode)
+    if not relation:
+        return ""
+    wanted_seasons = _pack_seasons(wanted)
+    child_seasons = _pack_seasons(child)
+    if wanted_seasons and child_seasons:
+        if wanted_seasons.isdisjoint(child_seasons):
+            return ""
+    elif wanted_seasons or child_seasons:
+        # 一边写着季一边没写，说不准是哪一季，不认。
+        return ""
+    w_latin, w_cjk = _pack_core(wanted)
+    c_latin, c_cjk = _pack_core(child)
+    if not (w_latin or w_cjk) or not (c_latin or c_cjk):
+        return ""
+    # 两边都看不出集数时不敢放宽字幕组，只能按原名认。
+    strict = not wanted_eps and not child_eps
+    lead = set() if strict else _pack_lead_words(child)
+    if c_latin - lead:
+        # 字幕组在开头方括号里，剧名在括号外，字幕组写法不同不算差异。
+        residual = (c_latin - w_latin) - lead
+    else:
+        # 整包名字都在方括号里，那就当剧名看，不能整个放过。
+        residual = c_latin - w_latin
+    if residual:
+        return ""
+    if c_cjk - w_cjk:
+        return ""
+    # 证据要落在剧名上：两边字幕组都算的话不算数，单独一个 no、the 也不算数。
+    evidence = (c_latin & w_latin) - _pack_lead_words(wanted)
+    if not _pack_evidence_ok(evidence) and not (c_cjk & w_cjk):
+        return ""
+    return relation
+
+
+def _pack_evidence_ok(evidence: set[str]) -> bool:
+    """共享的剧名词够不够硬。单个 no、the 这种常用词不算数。"""
+    if len(evidence) >= 2:
+        return True
+    return any(len(token) >= 5 for token in evidence)
+
+
+def _pack_candidates(nodes: list[Node], wanted: str, episode: int = 0) -> tuple[list[Node], bool]:
+    """按剧名核心和集数找这一包。第二个值表示有多个候选，不敢搬。"""
+    exact = []
+    batch = []
+    for item in nodes:
+        relation = _pack_match(wanted, item.name, episode)
+        if relation == "exact":
+            exact.append(item)
+        elif relation == "batch":
+            batch.append(item)
+    exact = _prefer_dir(exact)
+    batch = _prefer_dir(batch)
+    if len(exact) == 1:
+        return exact, False
+    if len(exact) > 1:
+        return exact, True
+    if len(batch) == 1:
+        return batch, False
+    return batch, len(batch) > 1
+
+
 def _node_file_id(node: Node) -> str:
     raw = node.raw
     if isinstance(raw, dict):
@@ -1360,17 +1587,23 @@ def _prefer_dir(nodes: list[Node]) -> list[Node]:
     return _unique_paths(dirs or nodes)
 
 
-def _match_one(nodes: list[Node], wanted: list[str]) -> list[Node]:
+def _match_one(nodes: list[Node], wanted: list[str], episode: int = 0) -> list[Node]:
     """按离线任务名、再按提交标题，各自单独对。对上一个就用它。"""
     for name in wanted:
-        for mode in ("exact", "partial"):
-            hits = _unique_paths(item for item in nodes if _name_hit(item.name, name, mode))
-            if len(hits) == 1:
-                return hits
+        exact = _unique_paths(item for item in nodes if _name_hit(item.name, name, "exact"))
+        if len(exact) == 1:
+            return exact
+        # 115 上离线包是种子原名，花园标题是重命名后的，按剧名核心加集数认。
+        packs, many = _pack_candidates(nodes, name, episode)
+        if len(packs) == 1:
+            return packs
+        partial = _unique_paths(item for item in nodes if _name_hit(item.name, name, "partial"))
+        if len(partial) == 1:
+            return partial
     return []
 
 
-def _choose_child(children: list[Node], wanted: list[str], file_id: str) -> tuple[Node | None, str]:
+def _choose_child(children: list[Node], wanted: list[str], file_id: str, episode: int = 0) -> tuple[Node | None, str]:
     if file_id:
         hits = [item for item in children if _node_file_id(item) == file_id]
         picked = _prefer_dir(hits)
@@ -1385,6 +1618,13 @@ def _choose_child(children: list[Node], wanted: list[str], file_id: str) -> tupl
             return exact[0], ""
         if len(exact) > 1:
             ambiguous = exact
+            continue
+        # 115 上离线包是种子原名，花园标题是重命名后的，按剧名核心加集数认。
+        packs, many = _pack_candidates(children, name, episode)
+        if len(packs) == 1:
+            return packs[0], ""
+        if many:
+            ambiguous = packs
             continue
         partial = _prefer_dir([item for item in children if _name_hit(item.name, name, "partial")])
         if len(partial) == 1:
