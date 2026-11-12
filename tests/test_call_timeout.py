@@ -151,7 +151,10 @@ class OrganizeTimeoutTest(unittest.TestCase):
         self.assertEqual(session.moves, [])
         self.assertEqual(self._task()[0]["status"], "submitted")
         reasons = [item.get("reason") for item in (result.get("moves") or [])]
-        self.assertTrue(any("失败" in (reason or "") for reason in reasons), reasons)
+        self.assertTrue(
+            any(("失败" in (reason or "")) or ("超时" in (reason or "")) for reason in reasons),
+            reasons,
+        )
 
     def test_hanging_move_is_recorded_as_failure(self):
         video = "佐藤同学 - 03.mkv"
@@ -189,6 +192,49 @@ class OrganizeTimeoutTest(unittest.TestCase):
             session.release.set()
         self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(session.moves, [])
+
+
+class ManyCallsTaskTest(unittest.TestCase):
+    """一条任务里连着列很多次目录时，不能把整轮拖死。"""
+
+    class ManyDirsSession(HangingSession):
+        """收件箱里有 60 个目录，找 file_id 时要一个个探。"""
+
+        def __init__(self):
+            super().__init__(hang_on=())
+            self.calls = 0
+
+        def list_dir(self, path):
+            self.calls += 1
+            if path.startswith("/box/dir"):
+                # 每个目录都慢一点，累计起来就会超出一条任务的预算
+                time.sleep(0.4)
+            return list(self.dirs.get(path, []))
+
+    def test_task_with_many_directory_probes_is_bounded(self):
+        session = self.ManyDirsSession()
+        for index in range(60):
+            session.dirs[f"/box/dir{index}"] = []
+        previous = anime_jobs._TASK_BUDGET
+        anime_jobs._TASK_BUDGET = 2
+        tasks = [{
+            "infohash": HASH,
+            "show": "佐藤同学",
+            "season": 1,
+            "episode": 3,
+            "title": "佐藤同学 - 03",
+            "folder": "/box",
+            "status": "submitted",
+        }]
+        started = time.monotonic()
+        try:
+            result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"))
+        finally:
+            anime_jobs._TASK_BUDGET = previous
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 20)
+        self.assertEqual(tasks[0]["status"], "submitted")
+        self.assertTrue(result["moves"])
 
 
 class RoundBudgetTest(unittest.TestCase):

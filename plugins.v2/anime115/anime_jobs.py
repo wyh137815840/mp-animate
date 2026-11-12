@@ -33,6 +33,10 @@ _SHOW_YEAR = re.compile(r"^(.+?)\s*[(（](\d{4})[)）](?:\s*\{tmdb-\d+\})?$")
 # 这里保留一份可覆盖的副本，单测可以把 _OFFLINE_CALL_TIMEOUT 调小来验证超时路径。
 _OFFLINE_CALL_TIMEOUT = OFFLINE_TIMEOUT
 _STORAGE_CALL_TIMEOUT = STORAGE_TIMEOUT
+# 单条任务的总预算（秒）。一条任务里可能连着列很多次目录，都要在这之内完成。
+_TASK_BUDGET = 120
+# 找 file_id 时最多探几个目录。收件箱里目录多的时候不能一个个试下去。
+_NESTED_PROBE_LIMIT = 20
 
 
 class JobStopped(Stopped):
@@ -76,9 +80,29 @@ def _call_safe(session, func, default=None, label: str = "115 调用", timeout: 
         return default
 
 
-def _list_dir(session, path: str) -> list:
-    """限时列一层目录。失败或超时抛出去，由调用方决定这一条怎么记。"""
-    items = _call(session, lambda: session.list_dir(path) or [], _STORAGE_CALL_TIMEOUT)
+def _task_limit(deadline: float = None) -> float:
+    """这一条任务还剩多少时间可用。"""
+    if deadline is None:
+        return _STORAGE_CALL_TIMEOUT
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("这一条整理超过时间预算")
+    return min(_STORAGE_CALL_TIMEOUT, remaining)
+
+
+def _list_dir(session, path: str, deadline: float = None) -> list:
+    """限时列一层目录。失败或超时抛出去，由调用方决定这一条怎么记。
+
+    deadline 是这一条任务的截止时间：单条任务里会连着列很多次目录，
+    每次都按 60 秒算，一条任务能拖很久，所以还要留一条任务的总预算。
+    """
+    limit = _STORAGE_CALL_TIMEOUT
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("这一条整理超过时间预算")
+        limit = min(limit, remaining)
+    items = _call(session, lambda: session.list_dir(path) or [], limit)
     return list(items)
 
 
@@ -448,7 +472,19 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
 
 
 def _organize_one(task, session, library, config, moves, offline=None) -> None:
-    files, pack, why, confirmed = _scope_to_pack(session, task, offline or {})
+    # 一条任务有自己的时间预算：它可能连着列很多次目录，不能只靠单次调用的时限。
+    deadline = time.monotonic() + _TASK_BUDGET
+    try:
+        files, pack, why, confirmed = _scope_to_pack(session, task, offline or {}, deadline)
+    except TimeoutError as exc:
+        moves.append({
+            "action": "leave",
+            "reason": "整理超时",
+            "error": str(exc),
+            "task": task.get("infohash"),
+            "nodes": [],
+        })
+        return
     if why:
         moves.append({"action": "leave", "reason": why, "task": task.get("infohash"), "nodes": [], "pack": pack})
         return
@@ -457,7 +493,7 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
     moves.append(decision)
     _close_empty_leftover(task, decision, confirmed, config)
     if decision["action"] == "move":
-        show_folder, why = _show_folder(session, library, task.get("show") or "")
+        show_folder, why = _show_folder(session, library, task.get("show") or "", deadline)
         if why:
             decision["action"] = "leave"
             decision["reason"] = why
@@ -470,7 +506,7 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
         return
     dest_dir = decision["dest_dir"]
     try:
-        made = _call(session, lambda: session.ensure_dir(dest_dir), _STORAGE_CALL_TIMEOUT)
+        made = _call(session, lambda: session.ensure_dir(dest_dir), _task_limit(deadline))
     except JobStopped:
         raise
     except Exception as exc:
@@ -485,7 +521,7 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
         decision["error"] = f"{dest_dir}：{failure}" if failure is not None else f"{dest_dir}：没有目录 id"
         return
     try:
-        existing = {item.name for item in _list_dir(session, dest_dir)}
+        existing = {item.name for item in _list_dir(session, dest_dir, deadline)}
     except JobStopped:
         raise
     except Exception:
@@ -496,7 +532,7 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
         return
     for item in decision["nodes"]:
         try:
-            moved = _call(session, lambda item=item: session.move(item, dest_dir, item.name), _STORAGE_CALL_TIMEOUT)
+            moved = _call(session, lambda item=item: session.move(item, dest_dir, item.name), _task_limit(deadline))
         except JobStopped:
             raise
         except Exception as exc:
@@ -1043,9 +1079,9 @@ def resolve_show_folder(names: list[str], show: str) -> tuple[str, str]:
     return wanted, ""
 
 
-def _show_folder(session, library: str, show: str) -> tuple[str, str]:
+def _show_folder(session, library: str, show: str, deadline: float = None) -> tuple[str, str]:
     try:
-        children = _list_dir(session, library)
+        children = _list_dir(session, library, deadline)
     except JobStopped:
         raise
     except Exception:
@@ -1173,7 +1209,7 @@ def _episode_of_name(name: str) -> tuple[int, int] | None:
     return parse_episode(text)
 
 
-def _scope_to_pack(session, task: dict, offline: dict) -> tuple[list[Node], str, str, bool]:
+def _scope_to_pack(session, task: dict, offline: dict, deadline: float = None) -> tuple[list[Node], str, str, bool]:
     """只看这一条磁力自己的目录，不扫同一天里的其它包。
 
     最后一个值表示这一包是不是已经看到了。空列表也可能是路径不存在。
@@ -1183,20 +1219,20 @@ def _scope_to_pack(session, task: dict, offline: dict) -> tuple[list[Node], str,
         return [], "", "没有离线目录", False
     wanted = _wanted_names(task, offline)
     file_id = _offline_file_id(offline)
-    children = _list_dir(session, inbox)
+    children = _list_dir(session, inbox, deadline)
     if _folder_is_pack(inbox, wanted):
-        files = _flatten_list(session, inbox, depth=3)
-        return files, inbox, "", _pack_seen(session, inbox, children, files)
+        files = _flatten_list(session, inbox, depth=3, deadline=deadline)
+        return files, inbox, "", _pack_seen(session, inbox, children, files, deadline)
     chosen, why = _choose_child(children, wanted, file_id)
     if why:
         return [], "", why, False
     if chosen is None and file_id:
-        chosen, why = _choose_by_nested_id(session, children, file_id)
+        chosen, why = _choose_by_nested_id(session, children, file_id, deadline)
     if why:
         return [], "", why, False
     if chosen is not None:
         if chosen.is_dir:
-            return _flatten_list(session, chosen.path, depth=3), chosen.path, "", True
+            return _flatten_list(session, chosen.path, depth=3, deadline=deadline), chosen.path, "", True
         return _file_and_sidecars(children, chosen), chosen.path, "", True
     dirs = [item for item in children if item.is_dir]
     if not dirs:
@@ -1205,8 +1241,8 @@ def _scope_to_pack(session, task: dict, offline: dict) -> tuple[list[Node], str,
             matched = _match_one(videos, wanted)
             if len(matched) == 1:
                 return _file_and_sidecars(children, matched[0]), matched[0].path, "", True
-        files = _flatten_list(session, inbox, depth=3)
-        return files, inbox, "", _pack_seen(session, inbox, children, files)
+        files = _flatten_list(session, inbox, depth=3, deadline=deadline)
+        return files, inbox, "", _pack_seen(session, inbox, children, files, deadline)
     label = wanted[0] if wanted else (task.get("show") or task.get("infohash") or "")
     listed = "、".join(item.name for item in dirs[:8])
     return [], "", f"找不到这一包：{label}；现有 {listed}", False
@@ -1225,21 +1261,21 @@ def _close_empty_leftover(task: dict, decision: dict, confirmed: bool, config: J
     task["reason"] = "没有视频"
 
 
-def _pack_seen(session, folder: str, children: list, files: list) -> bool:
+def _pack_seen(session, folder: str, children: list, files: list, deadline: float = None) -> bool:
     """看到里面的文件，或父目录里有这一层，才算这一包存在。"""
     if children or files:
         return True
-    return _dir_listed(session, folder)
+    return _dir_listed(session, folder, deadline)
 
 
-def _dir_listed(session, folder: str) -> bool:
+def _dir_listed(session, folder: str, deadline: float = None) -> bool:
     folder = norm(folder)
     if not folder or folder == "/":
         return False
     parent = parent_path(folder)
     leaf = name_of(folder)
     try:
-        children = _list_dir(session, parent)
+        children = _list_dir(session, parent, deadline)
     except JobStopped:
         raise
     except Exception:
@@ -1360,13 +1396,21 @@ def _choose_child(children: list[Node], wanted: list[str], file_id: str) -> tupl
     return None, ""
 
 
-def _choose_by_nested_id(session, children: list[Node], file_id: str) -> tuple[Node | None, str]:
-    """file_id 有时是外壳里面的正片，而不是外壳自己。"""
+def _choose_by_nested_id(session, children: list[Node], file_id: str, deadline: float = None) -> tuple[Node | None, str]:
+    """file_id 有时是外壳里面的正片，而不是外壳自己。
+
+    收件箱里目录多的时候不能一个个试下去，最多探 _NESTED_PROBE_LIMIT 个。
+    """
     owners = []
+    probes = 0
     for directory in children:
         if not directory.is_dir:
             continue
-        nested = _list_dir(session, directory.path)
+        if probes >= _NESTED_PROBE_LIMIT:
+            _job_log(f"动漫 115 找这一包只探了 {_NESTED_PROBE_LIMIT} 个目录，先记找不到", "warning")
+            break
+        probes += 1
+        nested = _list_dir(session, directory.path, deadline)
         if any(_node_file_id(item) == file_id for item in nested):
             owners.append(directory)
     if len(owners) == 1:
@@ -1461,7 +1505,7 @@ def _task_finished(task: dict) -> bool:
         return False
 
 
-def _flatten_list(session, root: str, depth: int) -> list[Node]:
+def _flatten_list(session, root: str, depth: int, deadline: float = None) -> list[Node]:
     found = []
     stack = [(norm(root), 0)]
     seen = set()
@@ -1472,7 +1516,7 @@ def _flatten_list(session, root: str, depth: int) -> list[Node]:
         if current in seen or level > depth:
             continue
         seen.add(current)
-        for item in _list_dir(session, current):
+        for item in _list_dir(session, current, deadline):
             node = item if isinstance(item, Node) else Node(
                 path=norm(getattr(item, "path", "")),
                 name=getattr(item, "name", "") or name_of(getattr(item, "path", "")),
