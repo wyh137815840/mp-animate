@@ -2254,8 +2254,24 @@ def _public_split(decision: dict) -> dict:
 
 
 def _public_move(decision: dict) -> dict:
-    hidden = {"nodes", "strm_url", "strm_relative"}
-    return {key: value for key, value in decision.items() if key not in hidden}
+    """对外的记录不能带文件对象，否则存库会失败。"""
+    hidden = {"nodes", "items", "strm_url", "strm_relative"}
+    record = {key: value for key, value in decision.items() if key not in hidden}
+    items = decision.get("items")
+    if isinstance(items, list):
+        record["episodes"] = [
+            {
+                "episode": item.get("episode"),
+                "season": item.get("season"),
+                "name": getattr(item.get("video"), "name", ""),
+                "strm": item.get("strm"),
+                "error": item.get("error") or item.get("strm_error"),
+                "skipped": item.get("skipped") or item.get("strm_skipped"),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ]
+    return record
 
 
 def _suffix(name: str) -> str:

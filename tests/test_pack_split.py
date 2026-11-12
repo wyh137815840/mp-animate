@@ -219,3 +219,26 @@ class NestedPackSplitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicRecordTest(unittest.TestCase):
+    """对外记录不能带文件对象，否则存库会失败。"""
+
+    def test_pack_record_is_json_serialisable(self):
+        import json
+
+        from anime115.anime_jobs import _public_move
+
+        files = [
+            _video(PACK, "[LoliHouse] Kakkou no Iinazuke S2 - 01 [1080p].mkv"),
+            _video(PACK, "[LoliHouse] Kakkou no Iinazuke S2 - 02 [1080p].mkv"),
+        ]
+        session = _pack_session(files)
+        tasks = _task()
+        result = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫", strm_root="/strm"))
+        json.dumps(result)
+        record = _public_move(result["moves"][0])
+        json.dumps(record)
+        self.assertNotIn("items", record)
+        self.assertNotIn("nodes", record)
+        self.assertEqual([item["episode"] for item in record["episodes"]], [1, 2])
