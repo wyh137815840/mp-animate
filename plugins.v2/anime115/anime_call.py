@@ -15,6 +15,8 @@ import time
 STORAGE_TIMEOUT = 60
 # 离线列表、配额、登录检查这类调用给更短的时限。
 OFFLINE_TIMEOUT = 45
+# 一轮任务的总预算（秒）。超过就干净收尾，不让这一轮压住下一个周期。
+ROUND_BUDGET = 900
 
 
 class Stopped(Exception):
@@ -74,3 +76,10 @@ def wait_call(cancel, func, timeout: float):
 def call(session, func, timeout: float = STORAGE_TIMEOUT):
     """按会话自己的取消事件限时调用一次 115。"""
     return wait_call(getattr(session, "cancel", None), func, timeout)
+
+
+def budget_exceeded(started_at: float, budget: float = ROUND_BUDGET) -> bool:
+    """这一轮是不是已经用完时间预算。"""
+    if not budget or budget <= 0:
+        return False
+    return (time.monotonic() - started_at) >= budget

@@ -191,5 +191,48 @@ class OrganizeTimeoutTest(unittest.TestCase):
         self.assertEqual(session.moves, [])
 
 
+class RoundBudgetTest(unittest.TestCase):
+    def _config(self):
+        return JobConfig(dry_run=False, library_root="/动漫")
+
+    def test_budget_exceeded(self):
+        from anime115.anime_call import budget_exceeded
+
+        self.assertFalse(budget_exceeded(time.monotonic(), 60))
+        self.assertTrue(budget_exceeded(time.monotonic() - 120, 60))
+        self.assertFalse(budget_exceeded(time.monotonic() - 120, 0))
+
+    def test_organize_stops_at_the_round_budget(self):
+        """整轮预算用完时干净收尾，剩下的任务留到下一轮。"""
+        session = HangingSession()
+        previous = anime_jobs._STORAGE_CALL_TIMEOUT
+        previous_budget = anime_jobs.ROUND_BUDGET
+        anime_jobs._STORAGE_CALL_TIMEOUT = 0.2
+        anime_jobs.ROUND_BUDGET = 0.001
+        tasks = []
+        for index in range(6):
+            tasks.append({
+                "infohash": f"{index:040x}",
+                "show": "佐藤同学",
+                "season": 1,
+                "episode": index + 1,
+                "title": f"佐藤同学 - {index + 1:02d}",
+                "folder": "/box",
+                "status": "submitted",
+            })
+        started = time.monotonic()
+        try:
+            result = run_organize(tasks, session, self._config())
+        finally:
+            anime_jobs._STORAGE_CALL_TIMEOUT = previous
+            anime_jobs.ROUND_BUDGET = previous_budget
+            session.release.set()
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("error"), "已停止")
+        for task in tasks:
+            self.assertEqual(task["status"], "submitted")
+
+
 if __name__ == "__main__":
     unittest.main()

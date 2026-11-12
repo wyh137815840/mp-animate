@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .anime_call import (
     OFFLINE_TIMEOUT,
+    ROUND_BUDGET,
     STORAGE_TIMEOUT,
     Stopped,
+    budget_exceeded,
     stopped,
     system_stopped,
     wait_call,
@@ -225,6 +228,7 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
         _tell(report, job="daily", phase="failed", dry_run=config.dry_run, index=0, total=0, current="", result="失败", failed=1)
         return {"ok": False, "error": "未配置追更", "picks": [], "dry_run": config.dry_run}
     inbox = _dated_inbox(config, now)
+    started = time.monotonic()
     picks, notes = select_shows(shows, entries_of, config.search, now)
     owned = _OwnedIndex(session, config) if config.skip_owned else None
     chosen = []
@@ -307,6 +311,10 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
             break
         if index % 5 == 0 and _system_stopped():
             return _daily_stopped(config, inbox, chosen, notes, submitted)
+        if index % 5 == 0 and budget_exceeded(started, ROUND_BUDGET):
+            _job_log("动漫 115 每日任务超过时间预算，先收尾，下一轮继续", "warning")
+            notes.append({"show": "", "title": "", "reason": "本轮超过时间预算，剩下的留到下一轮"})
+            break
         if index:
             session.sleep(config.offline_gap_seconds)
         if _cancelled(session):
@@ -394,11 +402,15 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
             work.append((task, {}))
     moves = []
     organized = skipped = failed = 0
+    started = time.monotonic()
     _tell(report, job="organize", phase="running", dry_run=config.dry_run, index=0, total=len(work), organized=0, skipped=0, failed=0, current="", result="")
     for index, pair in enumerate(work, start=1):
         if _cancelled(session):
             return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         if index % 5 == 0 and _system_stopped():
+            return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
+        if index % 5 == 0 and budget_exceeded(started, ROUND_BUDGET):
+            _job_log("动漫 115 整理超过时间预算，剩下的任务留到下一轮", "warning")
             return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         task, offline = pair
         try:
@@ -594,10 +606,14 @@ def run_flatten(session, config: JobConfig, report=None) -> dict:
     if not logged_in:
         return {"ok": False, "error": "115 未登录", "counts": {}, "dry_run": config.dry_run}
     nodes = []
+    started = time.monotonic()
     try:
         for root in roots:
             if _cancelled(session):
                 raise JobStopped("已停止")
+            if budget_exceeded(started, ROUND_BUDGET):
+                _job_log("动漫 115 摊平超过时间预算，先收尾", "warning")
+                break
             nodes.extend(_flatten_list(session, root, depth=6))
     except JobStopped:
         return {"ok": False, "error": "已停止", "counts": {}, "dry_run": config.dry_run, "moved": 0}
