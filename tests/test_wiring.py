@@ -159,14 +159,29 @@ class RefreshResultTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
 
 
+class OwnedSessionTest(unittest.TestCase):
+    """查「库里已有同集」可以单独走 Cookie 会话，躲开开放平台的风控。"""
+
+    def test_run_daily_takes_owned_session(self):
+        jobs = sys.modules["app.plugins.anime115.anime_jobs"]
+
+        params = inspect.signature(jobs.run_daily).parameters
+        self.assertIn("owned_session", params)
+
+    def test_plugin_has_owned_session_helper(self):
+        plugin = _load_plugin()
+        self.assertTrue(hasattr(plugin.Anime115, "_owned_session"))
+
+
 class VersionTest(unittest.TestCase):
     def test_package_and_history(self):
         package = json.loads((Path(__file__).resolve().parents[1] / "package.v2.json").read_text(encoding="utf-8"))
-        self.assertEqual(package["Anime115"]["version"], "1.0.44")
+        self.assertEqual(package["Anime115"]["version"], "1.0.45")
         self.assertIn("按长度排序", package["Anime115"]["history"]["v1.0.42"])
         self.assertIn("蓝光大包", package["Anime115"]["history"]["v1.0.43"])
         self.assertIn("zh-CN", package["Anime115"]["history"]["v1.0.44"])
-        self.assertEqual(_PLUGIN.Anime115.plugin_version, "1.0.44")
+        self.assertIn("Cookie 通道", package["Anime115"]["history"]["v1.0.45"])
+        self.assertEqual(_PLUGIN.Anime115.plugin_version, "1.0.45")
 
 
 if __name__ == "__main__":

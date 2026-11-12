@@ -257,15 +257,20 @@ class JobConfig:
     subtitle_enabled: bool = True
 
 
-def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None) -> dict:
-    """搜索并在非预览时提交离线。预览不写 seen。"""
+def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None,
+              owned_session=None) -> dict:
+    """搜索并在非预览时提交离线。预览不写 seen。
+
+    owned_session 只用来查「库里已有同集」。开放平台的列表接口容易被 115 风控，
+    有 Cookie 时改用 Cookie 查，离线提交仍然走原来的通道。
+    """
     if not shows:
         _tell(report, job="daily", phase="failed", dry_run=config.dry_run, index=0, total=0, current="", result="失败", failed=1)
         return {"ok": False, "error": "未配置追更", "picks": [], "dry_run": config.dry_run}
     inbox = _dated_inbox(config, now)
     started = time.monotonic()
     picks, notes = select_shows(shows, entries_of, config.search, now)
-    owned = _OwnedIndex(session, config) if config.skip_owned else None
+    owned = _OwnedIndex(owned_session or session, config) if config.skip_owned else None
     chosen = []
     checked = 0
     scan_limit = max(config.max_submit_per_run * 3, 5)

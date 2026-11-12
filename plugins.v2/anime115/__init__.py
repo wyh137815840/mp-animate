@@ -65,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.44"
+    plugin_version = "1.0.45"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -598,6 +598,7 @@ class Anime115(_PluginBase):
             moment,
             config,
             report=self._report,
+            owned_session=self._owned_session(),
         )
         self._save_alias_cache()
         result["notes"] = skipped + (result.get("notes") or [])
@@ -835,6 +836,16 @@ class Anime115(_PluginBase):
             return CookieSession(cookie, self._cancel)
         logger.info(f"动漫 115 本轮使用已登录存储 {self._storage}")
         return _Mp115(self._storage, self._cancel)
+
+    def _owned_session(self):
+        """查「库里已有同集」用的会话。
+
+        开放平台的列表接口经常被 115 风控卡住，Cookie 通道不受影响，
+        所以有 Cookie 时用 Cookie 查，离线提交仍然走已登录存储。
+        """
+        if not self._cookie_value():
+            return None
+        return CookieSession(self._cookie_value(), self._cancel)
 
     def _stopped(self) -> bool:
         cancel = getattr(self, "_cancel", None)
