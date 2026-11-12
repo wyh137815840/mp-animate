@@ -74,6 +74,23 @@ class _Cookie:
         return []
 
 
+class FairOrderTest(unittest.TestCase):
+    """候选按剧轮流排，剧多了也不会全被前面那几部占满额度。"""
+
+    def test_round_robin_by_show(self):
+        from anime115.anime_jobs import _fair_order
+
+        class _Pick:
+            def __init__(self, show):
+                self.show = show
+
+        picks = [_Pick("A")] * 5 + [_Pick("B")] * 2 + [_Pick("C")]
+        ordered = [pick.show for pick in _fair_order(picks)]
+        self.assertEqual(ordered[:3], ["A", "B", "C"])
+        self.assertEqual(ordered[3:5], ["A", "B"])
+        self.assertEqual(len(ordered), 8)
+
+
 class DailyFallbackTest(unittest.TestCase):
     def _torrent(self):
         return Torrent("佐藤同学 - 03 [1080p][简体]", HASH, f"magnet:?xt=urn:btih:{HASH}", 900 * 1024 * 1024, NOW)

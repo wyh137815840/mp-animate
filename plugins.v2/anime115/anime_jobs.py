@@ -257,6 +257,25 @@ class JobConfig:
     subtitle_enabled: bool = True
 
 
+def _fair_order(picks: list) -> list:
+    """把候选按剧轮流排一遍。
+
+    每轮每部剧先出一条，剧多了也不会全被前面那几部占满额度。
+    """
+    grouped: dict[str, list] = {}
+    for pick in picks:
+        grouped.setdefault(getattr(pick, "show", "") or "", []).append(pick)
+    ordered = []
+    while True:
+        added = False
+        for items in grouped.values():
+            if items:
+                ordered.append(items.pop(0))
+                added = True
+        if not added:
+            return ordered
+
+
 def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None,
               owned_session=None, fallback_session=None) -> dict:
     """搜索并在非预览时提交离线。预览不写 seen。
@@ -275,7 +294,7 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
     chosen = []
     checked = 0
     scan_limit = max(config.max_submit_per_run * 3, 5)
-    for pick in picks:
+    for pick in _fair_order(picks):
         if len(chosen) >= config.max_submit_per_run or checked >= scan_limit:
             break
         if _episode_blocked(seen, pick, now):
