@@ -258,11 +258,12 @@ class JobConfig:
 
 
 def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None,
-              owned_session=None) -> dict:
+              owned_session=None, fallback_session=None) -> dict:
     """搜索并在非预览时提交离线。预览不写 seen。
 
     owned_session 只用来查「库里已有同集」。开放平台的列表接口容易被 115 风控，
-    有 Cookie 时改用 Cookie 查，离线提交仍然走原来的通道。
+    有 Cookie 时改用 Cookie 查，离线提交仍然走原来的通道；
+    fallback_session 是提交用的备用通道，开放平台超时时顶上。
     """
     if not shows:
         _tell(report, job="daily", phase="failed", dry_run=config.dry_run, index=0, total=0, current="", result="失败", failed=1)
@@ -332,7 +333,26 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
     except JobStopped:
         return _daily_stopped(config, inbox, chosen, notes, [])
     except TimeoutError as exc:
-        return {"ok": False, "error": f"离线配额查询超时：{exc}", "picks": [], "dry_run": False, "inbox": inbox}
+        if fallback_session is None:
+            return {
+                "ok": False,
+                "error": f"离线配额查询超时：{exc}（开放平台可能在风控，等风控过去再跑）",
+                "picks": [],
+                "dry_run": False,
+                "inbox": inbox,
+            }
+        # 开放平台被 115 风控时，改用 Cookie 通道提交；两边的任务是同一批。
+        _job_log(f"动漫 115 开放平台超时，改用 Cookie 通道提交：{exc}", "warning")
+        session = fallback_session
+        quota = None
+        try:
+            logged_in = _call(session, session.check_login)
+        except JobStopped:
+            return _daily_stopped(config, inbox, chosen, notes, [])
+        except TimeoutError:
+            logged_in = True
+        if not logged_in:
+            return {"ok": False, "error": "115 未登录", "picks": [], "dry_run": False}
     if quota is not None and quota <= 0:
         return {"ok": False, "error": "离线配额用尽", "picks": [_pick_row(item) for item in chosen], "dry_run": False}
     try:

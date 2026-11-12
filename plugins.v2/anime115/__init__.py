@@ -65,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.45"
+    plugin_version = "1.0.46"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -590,6 +590,7 @@ class Anime115(_PluginBase):
         config.search.bounds_of = live_bounds(self._tmdb_api_key, shanghai_today(moment))
         session = self._mp_session()
         cancel = getattr(session, "cancel", None)
+        cookie_session = self._owned_session()
         result = run_daily(
             shows,
             session,
@@ -598,7 +599,8 @@ class Anime115(_PluginBase):
             moment,
             config,
             report=self._report,
-            owned_session=self._owned_session(),
+            owned_session=cookie_session,
+            fallback_session=cookie_session,
         )
         self._save_alias_cache()
         result["notes"] = skipped + (result.get("notes") or [])
