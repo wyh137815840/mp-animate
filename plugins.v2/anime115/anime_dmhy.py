@@ -12,7 +12,15 @@ from typing import Callable
 from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
 
-from .anime_names import Show, _EPISODE_RANGE, _has_episode_range, parse_episode, title_matches
+from .anime_names import (
+    Show,
+    _EPISODE_RANGE,
+    _has_episode_range,
+    explicit_season,
+    parse_episode,
+    parse_episode_range,
+    title_matches,
+)
 
 
 _BATCH_KEYWORDS = re.compile(
@@ -76,13 +84,14 @@ class SearchOptions:
 
 @dataclass
 class Pick:
-    """一部剧里被选中的一集。"""
+    """一部剧里被选中的一集。整包时 pack 是它覆盖的集数范围。"""
 
     show: str
     season: int
     episode: int
     torrent: Torrent
     score: int
+    pack: tuple[int, int] | None = None
 
 
 def fetch_rss(keyword: str, timeout: int = 20) -> bytes:
@@ -211,6 +220,7 @@ def select_one(
 ) -> tuple[list[Pick], list[dict]]:
     """对一部剧打分。"""
     best: dict[tuple[int, int], Pick] = {}
+    packs: dict[tuple[int, int], Pick] = {}
     notes = []
     for torrent in torrents:
         score, reason = score_torrent(show, torrent, options, now)
@@ -219,7 +229,29 @@ def select_one(
             continue
         parsed = parse_episode(torrent.title)
         if parsed is None:
-            notes.append({"show": show.keyword, "title": torrent.title, "reason": "集数不确定"})
+            pack = parse_episode_range(torrent.title)
+            if pack is None:
+                notes.append({"show": show.keyword, "title": torrent.title, "reason": "集数不确定"})
+                continue
+            # 整包：01-12 这种。范围包要先认季，再看是不是这一季的。
+            first, second = pack
+            season = explicit_season(torrent.title) or int(show.season or 1)
+            if show.season and season != show.season:
+                notes.append({"show": show.keyword, "title": torrent.title, "reason": "季数不对"})
+                continue
+            progress = options.bounds_of(show, season) if options.bounds_of else None
+            if progress is not None:
+                count, last_aired = progress
+                if count and second > count:
+                    notes.append({"show": show.keyword, "title": torrent.title, "reason": "超出季集数"})
+                    continue
+                if show.airing and last_aired is not None and first > last_aired:
+                    notes.append({"show": show.keyword, "title": torrent.title, "reason": "尚未播出"})
+                    continue
+            pick = Pick(show.keyword, season, first, torrent, score, pack=(first, second))
+            current = packs.get((season, first))
+            if current is None or _better(pick, current):
+                packs[(season, first)] = pick
             continue
         season, episode = parsed
         if show.season and season != show.season:
@@ -238,7 +270,7 @@ def select_one(
         current = best.get((season, episode))
         if current is None or _better(pick, current):
             best[(season, episode)] = pick
-    return list(best.values()), notes
+    return [*list(best.values()), *list(packs.values())], notes
 
 
 def score_torrent(

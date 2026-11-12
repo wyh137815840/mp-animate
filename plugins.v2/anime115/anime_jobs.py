@@ -488,7 +488,7 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
     if why:
         moves.append({"action": "leave", "reason": why, "task": task.get("infohash"), "nodes": [], "pack": pack})
         return
-    decision = _decide_move(task, files, library)
+    decision = _decide_move(task, files, library, pack)
     decision["pack"] = pack
     moves.append(decision)
     _close_empty_leftover(task, decision, confirmed, config)
@@ -526,6 +526,48 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
         raise
     except Exception:
         existing = set()
+    if decision.get("items"):
+        # 整包：一集一集搬，一集一个 strm
+        moved_items = 0
+        failed = 0
+        for item in decision["items"]:
+            if item["video"].name in existing:
+                item["skipped"] = "collision"
+                continue
+            ok = True
+            for node in item["nodes"]:
+                try:
+                    moved = _call(
+                        session,
+                        lambda node=node: session.move(node, dest_dir, node.name),
+                        _task_limit(deadline),
+                    )
+                except JobStopped:
+                    raise
+                except Exception as exc:
+                    _job_log(f"动漫 115 移动失败 {node.name}：{exc}", "warning")
+                    moved = False
+                if not moved:
+                    ok = False
+                    break
+                session.sleep(config.move_gap_seconds)
+            if not ok:
+                failed += 1
+                item["error"] = "移动失败"
+                continue
+            moved_items += 1
+            _apply_strm_item(decision, item, config, write=True, cancel=getattr(session, "cancel", None))
+        decision["moved_episodes"] = moved_items
+        decision["failed_episodes"] = failed
+        if moved_items:
+            _remove_empty_dir(session, decision, pack)
+        if failed:
+            # 有一集没搬成，任务留着，下一轮继续
+            decision["action"] = "leave"
+            decision["reason"] = "整包有集没搬成"
+            return
+        task["status"] = "moved"
+        return
     if decision["name"] in existing:
         decision["action"] = "leave"
         decision["reason"] = "collision"
@@ -1770,7 +1812,92 @@ def _flatten_list(session, root: str, depth: int, deadline: float = None) -> lis
     return found
 
 
-def _decide_move(task: dict, files: list[Node], library: str) -> dict:
+def _explicit_season(name: str) -> int | None:
+    """名字里明确写出的季号。没写就返回空。"""
+    from .anime_names import explicit_season
+
+    return explicit_season(name)
+
+
+def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node]) -> list[dict]:
+    """整包：按每个视频自己文件名里的集数，拆成一集一项。
+
+    认不准就返回空列表，让上层按单集处理（宁可少收，不要收错）。
+    要求：每个视频都有集数、互不重复、连号、季与包一致。
+    """
+    season = int(task.get("season") or 0)
+    pack_seasons = _pack_seasons(pack_name or "")
+    if len(pack_seasons) == 1:
+        season = next(iter(pack_seasons))
+    if season <= 0:
+        return []
+    items = []
+    used = set()
+    for video in videos:
+        parsed = parse_episode(video.name)
+        if parsed is None:
+            return []
+        file_season, episode = parsed
+        if episode <= 0:
+            return []
+        explicit = _explicit_season(video.name)
+        if explicit is not None and explicit != season:
+            # 文件写的是别的季，不敢拆
+            return []
+        if file_season > 0 and explicit is None and file_season != season:
+            return []
+        if episode in used:
+            # 同一集有多个版本，交给单集逻辑
+            return []
+        used.add(episode)
+        items.append({"video": video, "season": season, "episode": episode})
+    if len(items) < 2:
+        return []
+    numbers = sorted(item["episode"] for item in items)
+    if numbers != list(range(numbers[0], numbers[-1] + 1)):
+        # 不连号，更像多版本而不是整包
+        return []
+    return sorted(items, key=lambda item: item["episode"])
+
+
+def _pack_sidecars(files: list[Node], video: Node) -> list[Node]:
+    """和这一集同名的字幕、字体等附属文件，跟着一起搬。"""
+    stem = video.name.rsplit(".", 1)[0]
+    home = parent_path(video.path)
+    kept = []
+    for item in files:
+        if item.path == video.path or item.is_dir:
+            continue
+        if parent_path(item.path) != home:
+            continue
+        if _is_subtitle(item.name) or item.name.startswith(stem + ".") or item.name.startswith(stem + " "):
+            kept.append(item)
+    return kept
+
+
+def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "") -> dict:
+    # 整包优先：包里多集时按每集自己的集数拆开入库。
+    all_videos = _real_videos(files)
+    if len(all_videos) > 1:
+        items = _pack_items(all_videos, task, pack_name, files)
+        if items:
+            show = safe_dir_name(task.get("show") or "unknown")
+            season = items[0]["season"]
+            dest_dir = join_path(join_path(library, show), f"Season {season:02d}")
+            for item in items:
+                item["nodes"] = [item["video"], *_pack_sidecars(files, item["video"])]
+            return {
+                "action": "move",
+                "reason": "ok",
+                "task": task.get("infohash"),
+                "dest_dir": dest_dir,
+                "name": None,
+                "season": season,
+                "episode": 0,
+                "nodes": [node for item in items for node in item["nodes"]],
+                "items": items,
+                "pack_episodes": len(items),
+            }
     videos = _videos_for_task(files, task)
     if not videos:
         present = [item for item in files if _is_video_file(item)]
@@ -1819,38 +1946,91 @@ def _apply_strm(decision: dict, config: JobConfig, write: bool, cancel=None) -> 
     root = (config.strm_root or "").strip()
     if not root or decision.get("action") != "move":
         return
+    if decision.get("items"):
+        for item in decision["items"]:
+            _apply_strm_item(decision, item, config, write=write, cancel=cancel)
+        return
     video = next((item for item in decision.get("nodes") or [] if item.name == decision.get("name")), None)
     if video is None:
         decision["strm_error"] = "没有视频"
         return
+    result = _write_strm_for(decision, config, video, int(decision.get("season") or 0),
+                              int(decision.get("episode") or 0), write=write, cancel=cancel)
+    decision.update(result)
+
+
+def _apply_strm_item(decision: dict, item: dict, config: JobConfig, write: bool, cancel=None) -> None:
+    """整包里的一集：单独写一个 strm。"""
+    video = item.get("video")
+    if video is None:
+        item["strm_error"] = "没有视频"
+        return
+    result = _write_strm_for(
+        decision,
+        config,
+        video,
+        int(item.get("season") or 0),
+        int(item.get("episode") or 0),
+        write=write,
+        cancel=cancel,
+    )
+    if result.get("strm"):
+        item["strm"] = result["strm"]
+    if result.get("strm_error"):
+        item["strm_error"] = result["strm_error"]
+    if result.get("strm_skipped"):
+        item["strm_skipped"] = result["strm_skipped"]
+
+
+def _write_strm_for(decision: dict, config: JobConfig, video, season: int, episode: int,
+                     write: bool, cancel=None) -> dict:
+    """给一集写 strm，返回结果。strm 根为空就什么都不做。"""
+    root = (config.strm_root or "").strip()
+    result: dict = {}
+    if not root:
+        return result
     code = pickcode_of(video)
     if not code:
-        decision["strm_error"] = "缺少 pickcode"
-        return
+        result["strm_error"] = "缺少 pickcode"
+        return result
     show = name_of(parent_path(decision["dest_dir"]))
-    season = _season_dir_number(name_of(decision["dest_dir"])) or int(decision.get("season") or 0)
-    episode = int(decision.get("episode") or 0)
+    dir_season = _season_dir_number(name_of(decision["dest_dir"]))
+    season = dir_season or int(season or 0)
     if season <= 0 or episode <= 0:
-        decision["strm_error"] = "集数对不上"
-        return
+        result["strm_error"] = "集数对不上"
+        return result
     relative = strm_relative(show, season, episode, video.name)
     try:
         url = _play_url(config, code, video.name)
     except PlayUrlError as exc:
-        decision["strm_error"] = str(exc)
-        return
-    decision["strm_relative"] = relative
-    decision["strm_url"] = url
+        result["strm_error"] = str(exc)
+        return result
+    result["strm_relative"] = relative
+    result["strm_url"] = url
     if _local_episode_exists(root, relative, season, episode):
-        decision["strm_skipped"] = "季目录已有同集视频"
-        return
+        result["strm_skipped"] = "季目录已有同集视频"
+        return result
     if not write:
-        decision["strm"] = str(Path(root) / relative)
+        result["strm"] = str(Path(root) / relative)
+        return result
+    try:
+        result["strm"] = commit_strm(root, relative, url, cancel=cancel)
+    except OSError as exc:
+        result["strm_error"] = str(exc)
+    return result
+
+
+def _remove_empty_dir(session, decision: dict, pack: str) -> None:
+    """整包搬空后，把原来那个包目录删掉。里面还有东西就不动。"""
+    folder = norm(pack or "")
+    if not folder or folder == "/" or not folder.startswith("/离线下载"):
         return
     try:
-        decision["strm"] = commit_strm(root, relative, url, cancel=cancel)
-    except OSError as exc:
-        decision["strm_error"] = str(exc)
+        if session.list_dir(folder):
+            return
+        session.delete_dir(folder)
+    except Exception as exc:
+        _job_log(f"动漫 115 清理空包目录失败 {folder}：{exc}", "warning")
 
 
 def _local_episode_exists(root: str, relative: str, season: int, episode: int) -> bool:
@@ -1888,6 +2068,118 @@ def _library_videos(session, library: str, limit: str) -> list[dict]:
             if _is_video_file(child):
                 rows.append(_video_row(show.name, 0, child))
     return rows
+
+
+def run_split(session, config: JobConfig, limit: str = "", report=None) -> dict:
+    """把库里放错位置的整包拆开：季目录里再套一层的包，拆成一集一集。
+
+    只处理「季目录里多出来的一层目录」，里面有多集且集数认得出来时才动。
+    """
+    library = strip_mount_prefix(config.library_root, config.mount_prefix) if config.library_root else ""
+    root = (config.strm_root or "").strip()
+    if not library or library == "/":
+        return {"ok": False, "error": "没有填写库根", "items": [], "dry_run": config.dry_run}
+    if not root:
+        return {"ok": False, "error": "没有填写 strm 目录", "items": [], "dry_run": config.dry_run}
+    chosen = strip_mount_prefix(limit, config.mount_prefix) if (limit or "").strip() else ""
+    if chosen and chosen != library and not chosen.startswith(library + "/"):
+        return {"ok": False, "error": "路径不在库根下", "items": [], "dry_run": config.dry_run}
+    try:
+        logged_in = _call(session, session.check_login)
+    except JobStopped:
+        return {"ok": False, "error": "已停止", "items": [], "dry_run": config.dry_run}
+    except TimeoutError as exc:
+        return {"ok": False, "error": f"115 登录检查超时：{exc}", "items": [], "dry_run": config.dry_run}
+    if not logged_in:
+        return {"ok": False, "error": "115 未登录", "items": [], "dry_run": config.dry_run}
+    started = time.monotonic()
+    deadline = started + _TASK_BUDGET * 3
+    shows = _list_dir(session, chosen or library)
+    items = []
+    moved = failed = 0
+    for show in [node for node in shows if node.is_dir]:
+        if _cancelled(session):
+            return {"ok": False, "error": "已停止", "items": items, "dry_run": config.dry_run}
+        for season_dir in [node for node in _list_dir(session, show.path) if node.is_dir]:
+            season_no = _season_dir_number(season_dir.name)
+            if not season_no:
+                continue
+            for nested in [node for node in _list_dir(session, season_dir.path) if node.is_dir]:
+                if budget_exceeded(started, _TASK_BUDGET * 3):
+                    _job_log("动漫 115 拆包超过时间预算，先收尾", "warning")
+                    return {"ok": True, "items": items, "moved": moved, "failed": failed,
+                            "dry_run": config.dry_run}
+                files = _flatten_list(session, nested.path, depth=2, deadline=deadline)
+                videos = _real_videos(files)
+                if len(videos) < 2:
+                    continue
+                items_item = _split_nested_pack(session, show, season_dir, nested, videos, files,
+                                                config, deadline)
+                if items_item is None:
+                    continue
+                item, done, bad = items_item
+                items.append(item)
+                moved += done
+                failed += bad
+    return {"ok": True, "items": items, "moved": moved, "failed": failed, "dry_run": config.dry_run}
+
+
+def _split_nested_pack(session, show: Node, season_dir: Node, nested: Node, videos: list[Node],
+                       files: list[Node], config: JobConfig, deadline: float):
+    """把季目录里多出来的那层包拆开。返回 (记录, 搬成几集, 失败几集)。"""
+    season = _season_dir_number(season_dir.name)
+    items = _pack_items(videos, {"season": season}, nested.name, files)
+    if not items:
+        return None
+    decision = {
+        "action": "move",
+        "reason": "ok",
+        "dest_dir": season_dir.path,
+        "name": None,
+        "season": season,
+        "episode": 0,
+        "items": [],
+        "nodes": [],
+        "pack": nested.path,
+    }
+    for item in items:
+        item["nodes"] = [item["video"], *_pack_sidecars(files, item["video"])]
+    decision["items"] = items
+    decision["nodes"] = [node for item in items for node in item["nodes"]]
+    if config.dry_run:
+        decision["moved_episodes"] = len(items)
+        decision["pack_episodes"] = len(items)
+        return decision, 0, 0
+    moved = 0
+    failed = 0
+    for item in items:
+        ok = True
+        for node in item["nodes"]:
+            try:
+                ok = _call(session, lambda node=node: session.move(node, season_dir.path, node.name),
+                           _task_limit(deadline))
+            except JobStopped:
+                raise
+            except Exception as exc:
+                _job_log(f"动漫 115 拆包移动失败 {node.name}：{exc}", "warning")
+                ok = False
+            if not ok:
+                break
+            session.sleep(config.move_gap_seconds)
+        if not ok:
+            failed += 1
+            item["error"] = "移动失败"
+            continue
+        moved += 1
+        _apply_strm_item(decision, item, config, write=True, cancel=getattr(session, "cancel", None))
+    decision["moved_episodes"] = moved
+    decision["failed_episodes"] = failed
+    try:
+        if not session.list_dir(nested.path):
+            session.delete_dir(nested.path)
+    except Exception:
+        pass
+    return decision, moved, failed
 
 
 def _video_row(show: str, season_no: int, video: Node) -> dict:

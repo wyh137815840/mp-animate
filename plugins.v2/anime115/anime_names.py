@@ -310,6 +310,44 @@ def _season_number(token: str) -> int:
     return _SEASON_WORD.get(token, 1)
 
 
+# 集数范围：01-12、1-24。前面挡住 S/E 和数字，避免把 S01E03、日期当范围。
+_RANGE_EPISODE = re.compile(
+    r"(?<![\d.\-SEse])(\d{1,3})\s*[-\u2013~]\s*(\d{1,3})(?:\s*v\d+)?(?![\dA-Za-z])",
+    re.IGNORECASE,
+)
+# 标题里明确写出的季号。
+_SEASON_MARKER = re.compile(
+    r"(?:第\s*([0-9]{1,2}|[一二三四五六七八九十])\s*[季期]"
+    r"|season\s*([0-9]{1,2})"
+    r"|([0-9]{1,2})\s*(?:st|nd|rd|th)\s*season"
+    r"|(?<![0-9a-z])s([0-9]{1,2})(?![0-9]))",
+    re.IGNORECASE,
+)
+
+
+def parse_episode_range(title: str) -> tuple[int, int] | None:
+    """标题里的集数范围，如 01-12、1-24。不是范围就返回空。"""
+    for matched in _RANGE_EPISODE.finditer(title or ""):
+        first, second = int(matched.group(1)), int(matched.group(2))
+        if 0 < first < second <= 999:
+            return first, second
+    return None
+
+
+def explicit_season(title: str) -> int | None:
+    """标题里明确写出的季号。没写就返回空，不猜。"""
+    matched = _SEASON_MARKER.search(title or "")
+    if not matched:
+        return None
+    for token in matched.groups():
+        if not token:
+            continue
+        if token.isdigit():
+            return int(token)
+        return _SEASON_WORD.get(token, 1)
+    return None
+
+
 def _season_from_words(text: str) -> int:
     """没有明确季标记时算第 1 季。"""
     seasons = _seasons_in_text(text)

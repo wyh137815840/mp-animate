@@ -28,7 +28,16 @@ from .anime_pan import CookieSession
 from .anime_progress import advance, format_progress, format_state
 from .anime_dmhy import SearchOptions, fetch_list, fetch_rss, merge_sizes, parse_list_sizes, parse_rss
 from .anime_flatten import Node
-from .anime_jobs import JobConfig, JobStopped, new_task, run_daily, run_flatten, run_organize, run_strm as write_library_strm
+from .anime_jobs import (
+    JobConfig,
+    JobStopped,
+    new_task,
+    run_daily,
+    run_flatten,
+    run_organize,
+    run_split,
+    run_strm as write_library_strm,
+)
 from .anime_names import Show, _fold_name, norm, parse_watchlist
 from .anime_subscribe import load_mp_subscriptions, shows_from_subscriptions
 from .anime_tmdb import live_bounds, shanghai_today
@@ -56,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.29"
+    plugin_version = "1.0.30"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -180,7 +189,7 @@ class Anime115(_PluginBase):
                 "methods": ["POST"],
                 "auth": "apikey",
                 "summary": "运行任务",
-                "description": "job=daily、organize、flatten 或 strm。strm 可带 root=某一剧目录",
+                "description": "job=daily、organize、flatten、strm 或 split。strm/split 可带 root=某一剧目录",
             },
             {
                 "path": "/status",
@@ -377,6 +386,9 @@ class Anime115(_PluginBase):
         if name == "strm":
             threading.Thread(target=lambda: self.run_strm(limit), name="anime115-strm", daemon=True).start()
             return {"ok": True, "message": "已开始", "job": name}
+        if name == "split":
+            threading.Thread(target=lambda: self.run_split(limit), name="anime115-split", daemon=True).start()
+            return {"ok": True, "message": "已开始", "job": name}
         target = {"daily": self.run_daily, "organize": self.run_organize, "flatten": self.run_flatten}.get(name)
         if target is None:
             return {"ok": False, "error": "未知任务"}
@@ -468,6 +480,11 @@ class Anime115(_PluginBase):
         """给库里已有的视频补 strm，不移动。"""
         self._strm_limit = root
         return self._guard("strm", self._strm)
+
+    def run_split(self, root: str = "") -> dict:
+        """把库里放错位置的整包拆成一集一集。"""
+        self._split_limit = root
+        return self._guard("split", self._split)
 
     def _guard(self, kind: str, func) -> dict:
         if not hasattr(self, "_lock"):
@@ -707,6 +724,14 @@ class Anime115(_PluginBase):
         result = write_library_strm(self._session(), self._config(), limit, report=self._report)
         wrote = not result.get("dry_run") and int(result.get("written") or 0) > 0
         self._refresh_emby_result(result, wrote, int(result.get("written") or 0) > 0)
+        return result
+
+    def _split(self) -> dict:
+        limit = getattr(self, "_split_limit", "") or ""
+        result = run_split(self._session(), self._config(), limit, report=self._report)
+        moved = int(result.get("moved") or 0)
+        if moved and not result.get("dry_run"):
+            self._refresh_emby_result(result, wrote=True, planning=False)
         return result
 
     def _refresh_emby_result(self, payload: dict, wrote: bool, planning: bool) -> None:

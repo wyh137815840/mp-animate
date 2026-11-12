@@ -171,14 +171,18 @@ class BatchRangeTest(unittest.TestCase):
         self.assertIsNotNone(score)
         self.assertEqual(reason, "")
 
-    def test_select_one_skips_range_pack(self):
+    def test_select_one_takes_range_pack_when_allowed(self):
+        """允许合集时整包也能选：整包按范围收下，单集照旧。"""
         show = parse_watchlist("佐藤同学 | group=喵萌")[0]
         pack = torrent("佐藤同学 01-12 [1080p][简体]", "b" * 40)
         single = torrent("佐藤同学 - 05 [1080p][简体]", "c" * 40)
         allowed = SearchOptions(allow_batch=True)
         picks, notes = select_one(show, [pack, single], allowed, NOW)
-        self.assertEqual([(pick.season, pick.episode) for pick in picks], [(1, 5)])
-        self.assertEqual(notes, [{"show": "佐藤同学", "title": pack.title, "reason": "集数不确定"}])
+        self.assertEqual(sorted((pick.season, pick.episode) for pick in picks), [(1, 1), (1, 5)])
+        pack_picks = [pick for pick in picks if pick.pack]
+        self.assertEqual(len(pack_picks), 1)
+        self.assertEqual(pack_picks[0].pack, (1, 12))
+        self.assertEqual(notes, [])
 
     def test_select_one_drops_range_pack_by_default(self):
         show = parse_watchlist("佐藤同学 | group=喵萌")[0]
