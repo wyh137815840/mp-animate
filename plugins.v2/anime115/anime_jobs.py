@@ -2185,7 +2185,17 @@ def _split_nested_pack(session, show: Node, season_dir: Node, nested: Node, vide
         return decision, 0, 0
     moved = 0
     failed = 0
+    try:
+        existing = {node.name for node in _list_dir(session, season_dir.path, deadline)}
+    except JobStopped:
+        raise
+    except Exception:
+        existing = set()
     for item in items:
+        if item["video"].name in existing:
+            # 季目录里已经有同名文件，这一集跳过，不覆盖
+            item["skipped"] = "collision"
+            continue
         ok = True
         for node in item["nodes"]:
             try:

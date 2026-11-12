@@ -220,6 +220,19 @@ class NestedPackSplitTest(unittest.TestCase):
         self.assertEqual(result["moved"], 2)
         self.assertEqual(len(result["items"]), 1)
 
+    def test_nested_pack_with_existing_file_is_skipped(self):
+        """季目录里已经有同名文件，这一集跳过，不覆盖。"""
+        session = self._session()
+        session.dirs[self.SEASON] = session.dirs[self.SEASON] + [
+            Node(f"{self.SEASON}/[LoliHouse] Kakkou no Iinazuke S2 - 01 [1080p].mkv",
+                 "[LoliHouse] Kakkou no Iinazuke S2 - 01 [1080p].mkv", False, 1),
+        ]
+        result = run_split(session, JobConfig(dry_run=False, library_root="/动漫", strm_root="/strm"))
+        moved = [name for name, _, _ in session.moves]
+        self.assertEqual(len(moved), 1)
+        self.assertIn("- 02", moved[0])
+        self.assertEqual(result["moved"], 1)
+
     def test_nested_folder_with_one_video_is_kept(self):
         session = self._session()
         session.dirs[self.NESTED] = session.dirs[self.NESTED][:1]
