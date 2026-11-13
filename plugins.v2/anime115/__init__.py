@@ -65,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.58"
+    plugin_version = "1.0.59"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -778,9 +778,19 @@ class Anime115(_PluginBase):
         for item in payload.get("moves") or []:
             if not isinstance(item, dict):
                 continue
+            if item.get("action") not in {"move", "strm"} or item.get("error"):
+                continue
+            found = []
             path = str(item.get("strm") or "")
-            if path and item.get("action") in {"move", "strm"} and not item.get("error"):
-                paths.append(path)
+            if path:
+                found.append(path)
+            for episode in item.get("episodes") or []:
+                if not isinstance(episode, dict) or episode.get("error"):
+                    continue
+                one = str(episode.get("strm") or "")
+                if one:
+                    found.append(one)
+            paths.extend(found)
         if not paths:
             return
         try:
