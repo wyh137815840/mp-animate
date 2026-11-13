@@ -153,5 +153,44 @@ class DailyFallbackTest(unittest.TestCase):
         self.assertIn("配额查询超时", result["error"])
 
 
+class SeenKeyTest(unittest.TestCase):
+    """整包的「已经提交过」按整段记；之前那份是内封、这次是外挂的，放行。"""
+
+    def _pick(self, title, infohash, first=1, second=24):
+        from anime115.anime_dmhy import Pick
+        from anime115.anime_names import parse_watchlist
+
+        show = parse_watchlist("杜鹃的婚约")[0]
+        torrent = Torrent(title, infohash, f"magnet:?xt=urn:btih:{infohash}", 10 * 1024 ** 3, NOW)
+        return Pick(show.keyword, 1, first, torrent, 100, pack=(first, second))
+
+    def test_pack_with_external_sub_is_not_blocked(self):
+        from anime115.anime_jobs import _episode_blocked, _remember
+
+        seen = {}
+        embedded = self._pick("【喵萌奶茶屋】[杜鹃的婚约][01-24][BDRip][1080p][简体]", "a" * 40)
+        _remember(seen, embedded, NOW, "/离线下载/动漫/20261113")
+        external = self._pick("【喵萌奶茶屋】[杜鹃的婚约][01-24][BDRip][1080p][简繁外挂]", "b" * 40)
+        self.assertFalse(_episode_blocked(seen, external, NOW))
+
+    def test_same_pack_without_external_sub_stays_blocked(self):
+        from anime115.anime_jobs import _episode_blocked, _remember
+
+        seen = {}
+        first = self._pick("【喵萌奶茶屋】[杜鹃的婚约][01-24][BDRip][1080p][简体]", "a" * 40)
+        _remember(seen, first, NOW, "/离线下载/动漫/20261113")
+        again = self._pick("【喵萌奶茶屋】[杜鹃的婚约][01-24][BDRip][1080p][繁体]", "c" * 40)
+        self.assertTrue(_episode_blocked(seen, again, NOW))
+
+    def test_single_episode_still_blocked(self):
+        from anime115.anime_jobs import _episode_blocked, _remember
+
+        seen = {}
+        one = self._pick("【喵萌奶茶屋】[杜鹃的婚约][05][1080p][简体]", "a" * 40, 5, 0)
+        _remember(seen, one, NOW, "/离线下载/动漫/20261113")
+        other = self._pick("【喵萌奶茶屋】[杜鹃的婚约][05][1080p][繁體]", "d" * 40, 5, 0)
+        self.assertTrue(_episode_blocked(seen, other, NOW))
+
+
 if __name__ == "__main__":
     unittest.main()

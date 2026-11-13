@@ -867,17 +867,31 @@ def _dated_inbox(config: JobConfig, now: datetime) -> str:
     return root + "/" + stamp
 
 
+def _seen_key(pick: Pick) -> str:
+    """记住「这一集/这一包」的键。整包按整段记，不按第一集。"""
+    span = getattr(pick, "pack", None) or None
+    if span and int(span[1]) > int(span[0]):
+        return f"{pick.show}|{pick.season}|pack|{int(span[0])}-{int(span[1])}"
+    return f"{pick.show}|{pick.season}|{pick.episode}"
+
+
 def _episode_blocked(seen: dict, pick: Pick, now: datetime) -> bool:
     hashes = seen.setdefault("hashes", {})
     episodes = seen.setdefault("episodes", {})
     if pick.torrent.infohash in hashes:
         return True
-    key = f"{pick.show}|{pick.season}|{pick.episode}"
+    key = _seen_key(pick)
     previous = hashes.get(episodes.get(key, ""), {})
     if not previous:
         return False
     if previous.get("status") == "failed":
         return False
+    span = getattr(pick, "pack", None) or None
+    if span and int(span[1]) > int(span[0]):
+        # 整包：之前那一份是内封字幕、这一份是外挂字幕，就再下一份。
+        # 外挂字幕能单独挂到 Emby 旁边按语言切换，内封的做不到。
+        if "外挂" in (pick.torrent.title or "") and "外挂" not in str(previous.get("title") or ""):
+            return False
     submitted = _parse_time(previous.get("at"))
     if submitted and now - submitted > timedelta(days=3) and previous.get("status") != "moved":
         return False
@@ -887,7 +901,7 @@ def _episode_blocked(seen: dict, pick: Pick, now: datetime) -> bool:
 def _remember(seen: dict, pick: Pick, now: datetime, folder: str) -> None:
     hashes = seen.setdefault("hashes", {})
     episodes = seen.setdefault("episodes", {})
-    key = f"{pick.show}|{pick.season}|{pick.episode}"
+    key = _seen_key(pick)
     hashes[pick.torrent.infohash] = {
         "at": now.isoformat(),
         "show": pick.show,
