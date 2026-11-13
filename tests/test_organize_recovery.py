@@ -199,6 +199,35 @@ class RecoveryTest(unittest.TestCase):
         self.assertTrue(task.get('organize_reason'))
         self.assertIn('organize_checked_at', task)
 
+    def test_unnumbered_extras_do_not_block_the_main_episode(self):
+        files = [node('[DAY][女神のカフェテラス][第20話 「冗談」][BDrip][1080P].mkv'),
+                 node('[DAY][女神のカフェテラス][第21話 「母と娘」][BDrip][1080P].mkv'),
+                 node('PV①.mkv'), node('PV②.mkv'), node('Vol.4.mkv')]
+        d = _decide_move({'show': '女神的露天咖啡厅', 'season': 2, 'episode': 0}, files, '/anime', '女神的露天咖啡厅[BD]')
+        self.assertEqual(d['action'], 'move')
+        self.assertEqual([i['episode'] for i in d['items']], [20, 21])
+        self.assertTrue(all('PV' not in n.name and 'Vol.' not in n.name for n in d['nodes']))
+
+    def test_all_unnumbered_special_stays_put(self):
+        files = [node('[Snow-Raws] Mob Psycho 100 OAD (BD 1920x1080 FLACx2).mkv'),
+                 node('[Snow-Raws] Mob Psycho 100 OAD NCOP (BD 1920x1080 FLAC).mkv'),
+                 node('[Snow-Raws] Mob Psycho 100 OAD MENU (BD 1920x1080 FLAC).mkv')]
+        d = _decide_move({'show': 'Mob Psycho 100', 'season': 2, 'episode': 2}, files, '/anime')
+        self.assertEqual(d['action'], 'leave')
+
+    def test_volume_file_is_not_an_episode(self):
+        from anime115.anime_jobs import _pack_episode_full
+        self.assertEqual(_pack_episode_full('Vol.4.mkv'), 0)
+        self.assertEqual(_pack_episode_full('[BD] Show Vol.1 [1080p].mkv'), 0)
+        self.assertEqual(_pack_episode_full('Show - 04 [1080p].mkv'), 4)
+
+    def test_multi_season_pack_is_not_split_into_one_season(self):
+        from anime115.anime_jobs import _pack_items
+        files = [node('[DAY][女神のカフェテラス][第20話][BDrip].mkv'),
+                 node('[DAY][女神のカフェテラス][第21話][BDrip].mkv'),
+                 node('[DAY][女神のカフェテラス][第22話][BDrip].mkv')]
+        self.assertEqual(_pack_items(files, {'season': 2}, '女神的露天咖啡厅S1+S2[BD]', files), [])
+
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')

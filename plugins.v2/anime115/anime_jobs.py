@@ -1638,6 +1638,11 @@ def _pack_episode_relation(wanted: set[int], child: set[int], episode: int = 0) 
 
 def _pack_seasons(name: str) -> set[int]:
     """名字里能看出来的季。第一季不算，认不出就当没有。"""
+    return {value for value in _declared_seasons(name) if value > 1}
+
+
+def _declared_seasons(name: str) -> set[int]:
+    """名字里写明的所有季，包括第一季。用来判断一个包是不是混了多季。"""
     text = _pack_strip_ext(name)
     found: set[int] = set()
     for matched in _PACK_SEASON_CN_RE.finditer(text):
@@ -1652,7 +1657,7 @@ def _pack_seasons(name: str) -> set[int]:
     for token in latin:
         if token in _PACK_SEASON_ROMAN:
             found.add(_PACK_SEASON_ROMAN[token])
-    return {value for value in found if value > 1}
+    return found
 
 
 def _pack_match(wanted: str, child: str, episode: int = 0) -> str:
@@ -1907,11 +1912,25 @@ def _subtitle_in_dirs(session, children: list[Node], deadline: float = None) -> 
     return found
 
 
+def _main_videos(videos: list[Node]) -> list[Node]:
+    """一个包里认得出集数的才算正片。
+
+    BD 目录里常混着 NCOP、NCED、MENU、OAD、PV 这类没有集数的花絮，
+    它们认不出集数；只要包里还有认得出集数的正片，就把花絮排除掉。
+    全都认不出时保持原样，交给上层按「集数对不上」处理，不乱搬。
+    """
+    if len(videos) <= 1:
+        return videos
+    numbered = [item for item in videos if _pack_episode_full(item.name) > 0]
+    return numbered or videos
+
+
 def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
     """这一包里只有一个正片就用它。多个正片时只留集数对得上的，不对跨包合并。"""
     # 只排除有明确花絮标记的文件；全部是花絮时也不能回退为正片。
     original = _real_videos(files)
     videos = [item for item in original if not _is_extra_video(item.name)]
+    videos = _main_videos(videos)
     season = int(task.get("season") or 0)
     episode = int(task.get("episode") or 0)
     if len(videos) <= 1:
@@ -2053,16 +2072,22 @@ _PACK_TRAILING_NUMBER = re.compile(r"(?<![0-9A-Za-z])(\d{1,3})\s*$")
 _PACK_TAG_NUMBER = re.compile(r"[\[【]\s*(\d{1,3})\s*[\]】]")
 # 文件名里的方括号标签
 _PACK_TAGS = re.compile(r"[\[\(【][^\]\)】]*[\]\)】]")
+# 蓝光分卷文件：Vol.4.mkv 是一整卷，不是第四集。
+_PACK_VOLUME_FILE = re.compile(r"(?:^|[\s\[(])(?:vol(?:ume)?)[\s._-]*\d{1,2}(?=$|[\].)\s])", re.IGNORECASE)
+# 包名写明混了多季：S1+S2、S1&S2、S1/S2。
+_PACK_MULTI_SEASON = re.compile(r"[Ss]\s*(\d{1,2})\s*[+&/]\s*[Ss]\s*(\d{1,2})")
 
 
 def _pack_episode_full(name: str) -> int:
     """整包里文件名的集数。通用解析认不出的写法在这里兜底。
-
     - 「24 END」「[12END]」这类
     - 标题后面直接跟集数：Strike the Blood 23
     - OVA、SP 的文件名：通用解析一律不收，但整包里它们同样是这一集的内容
     """
     text = name or ""
+    if _PACK_VOLUME_FILE.search(text):
+        # Vol.4.mkv 是一整卷，不能当成第四集。
+        return 0
     episode = _pack_episode(text)
     if episode > 0:
         return episode
@@ -2133,6 +2158,9 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
         # 文件自己说是第几季就按它来：订阅的季和包的实际季可能不是一回事
         season = next(iter(explicit_seasons))
     else:
+        if _PACK_MULTI_SEASON.search(pack_name or ""):
+            # 包名写明混了多季（S1+S2），文件自己又没写属于哪一季，不敢整包按一季拆。
+            return []
         pack_seasons = _pack_seasons(pack_name or "")
         if len(pack_seasons) == 1:
             season = next(iter(pack_seasons))
@@ -2209,6 +2237,7 @@ def _move_name(item: dict, node: Node) -> str:
 def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "") -> dict:
     # 整包优先：包里多集时按每集自己的集数拆开入库。
     all_videos = [item for item in _real_videos(files) if not _is_extra_video(item.name)]
+    all_videos = _main_videos(all_videos)
     if len(all_videos) > 1:
         items = _pack_items(all_videos, task, pack_name, files)
         if items:
