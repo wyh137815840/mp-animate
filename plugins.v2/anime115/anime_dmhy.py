@@ -329,6 +329,9 @@ def score_torrent(
         score += 10
     elif re.search(r"繁体|CHT|BIG5", title, re.IGNORECASE):
         score += 5
+    if "外挂" in title:
+        # 外挂字幕能单独挂到 Emby 旁边，内封的做不到，同条件下优先外挂。
+        score += 25
     return score, ""
 
 

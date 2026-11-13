@@ -72,6 +72,25 @@ class BigPackTest(unittest.TestCase):
         )
 
 
+class SubtitleScoreTest(unittest.TestCase):
+    """外挂字幕优先：外挂能单独挂到 Emby 旁边，内封的做不到。"""
+
+    def _score(self, title):
+        from anime115.anime_dmhy import score_torrent
+        from anime115.anime_names import parse_watchlist
+
+        show = parse_watchlist("杜鹃的婚约")[0]
+        options = SearchOptions(min_episode_mb=150, max_episode_gb=20, max_pack_gb=400, allow_batch=True)
+        torrent = Torrent(title, "a" * 40, "magnet:?xt=urn:btih:" + "a" * 40, 10 * GB, NOW)
+        return score_torrent(show, torrent, options, NOW)[0]
+
+    def test_external_sub_wins_over_embedded(self):
+        embedded = self._score("【喵萌奶茶屋】[杜鹃的婚约][01-24][BDRip][1080p][简体][招募翻译]")
+        external = self._score("【喵萌奶茶屋】[杜鹃的婚约][01-24][BDRip][1080p][简繁外挂][招募翻译]")
+        self.assertIsNotNone(external)
+        self.assertGreater(external, embedded)
+
+
 class SizeGateTest(unittest.TestCase):
     def test_bluray_pack_accepted(self):
         """30G 的 12 集蓝光合集，每集 2.5G，应该收下。"""
