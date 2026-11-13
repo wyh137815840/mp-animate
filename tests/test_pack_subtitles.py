@@ -51,7 +51,7 @@ class PackSubtitleTest(unittest.TestCase):
         for item in decision["items"]:
             sub = item["subs"][0]
             name = _move_name(item, sub)
-            self.assertEqual(name, f"{item['video'].name.rsplit('.', 1)[0]}.ass")
+            self.assertEqual(name, f"{item['video'].name.rsplit('.', 1)[0]}.zh-CN.ass")
             # 视频本身不改名
             self.assertEqual(_move_name(item, item["video"]), item["video"].name)
 

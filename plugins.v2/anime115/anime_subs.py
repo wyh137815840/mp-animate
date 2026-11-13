@@ -116,7 +116,10 @@ def match_subtitles(files, video, episode: int, season: int = 0) -> list:
         picked.append(node)
 
     for item in same_dir:
-        if _same_stem(item.name, video_stem):
+        # 常见字幕名是 video.SC.ass / video.TC.ass / video.zh-CN.srt。
+        # 主干后带语言后缀时也应匹配，但不能把 Show - 01 匹配成 Show - 010。
+        sub_stem = stem_of(item.name).casefold()
+        if _same_stem(item.name, video_stem) or sub_stem.startswith(video_stem.casefold() + "."):
             take(item)
     if episode > 0:
         for item in same_dir:
@@ -142,7 +145,9 @@ def language_suffix(name: str) -> str:
     所以写的时候补上 zh-CN；文件名里写明繁体的按繁体算。
     """
     text = (name or "").lower()
-    if any(word in text for word in ("繁体", "繁體", "big5", "cht", "繁")):
+    if re.search(r"(?:^|[.\[\s_-])(?:tc|zh-tw)(?:[.\]\s_-]|$)", text) or any(
+        word in text for word in ("繁体", "繁體", "big5", "cht", "繁")
+    ):
         return "zh-TW"
     return "zh-CN"
 

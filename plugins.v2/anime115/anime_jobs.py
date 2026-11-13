@@ -43,7 +43,7 @@ _SHOW_YEAR = re.compile(r"^(.+?)\s*[(（](\d{4})[)）](?:\s*\{tmdb-\d+\})?$")
 # 这里保留一份可覆盖的副本，单测可以把 _OFFLINE_CALL_TIMEOUT 调小来验证超时路径。
 _OFFLINE_CALL_TIMEOUT = OFFLINE_TIMEOUT
 _STORAGE_CALL_TIMEOUT = STORAGE_TIMEOUT
-# 单条任务的总预算（秒）。一条任务里可能连着列很多次目录，都要在这之内完成。
+# 扫描单条任务的预算；大包搬运另按文件数分配有限预算（见 _move_budget）。
 _TASK_BUDGET = 120
 # 找 file_id 时最多探几个目录。收件箱里目录多的时候不能一个个试下去。
 _NESTED_PROBE_LIMIT = 20
@@ -98,6 +98,17 @@ def _task_limit(deadline: float = None) -> float:
     if remaining <= 0:
         raise TimeoutError("这一条整理超过时间预算")
     return min(_STORAGE_CALL_TIMEOUT, remaining)
+
+
+def _move_budget(config: JobConfig, n_nodes: int) -> float:
+    """按要搬的文件数给搬运时间。每个文件预留搬运间隔加一次调用的余量。
+
+    大包（整季 + 外挂字幕）文件多，固定预算会搬一半就超时；这里按文件数放宽，
+    封顶 600 秒，并由调用者约束在整轮截止时间内。
+    """
+    gap = max(0, int(getattr(config, "move_gap_seconds", 2) or 0))
+    needed = 60 + max(0, n_nodes) * (gap + 4)
+    return float(min(600, needed))
 
 
 def _list_dir(session, path: str, deadline: float = None) -> list:
@@ -500,12 +511,12 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
             return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         if index % 5 == 0 and _system_stopped():
             return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
-        if index % 5 == 0 and budget_exceeded(started, ROUND_BUDGET):
+        if budget_exceeded(started, ROUND_BUDGET):
             _job_log("动漫 115 整理超过时间预算，剩下的任务留到下一轮", "warning")
             return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         task, offline = pair
         try:
-            _organize_one(task, session, library, config, moves, offline)
+            _organize_one(task, session, library, config, moves, offline, round_deadline=started + ROUND_BUDGET)
         except JobStopped:
             return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         except Exception:
@@ -538,9 +549,11 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
     return _organize_status(config, [*pending, *moves], tasks=tasks, seen=seen, dirty=True)
 
 
-def _organize_one(task, session, library, config, moves, offline=None) -> None:
-    # 一条任务有自己的时间预算：它可能连着列很多次目录，不能只靠单次调用的时限。
+def _organize_one(task, session, library, config, moves, offline=None, round_deadline=None) -> None:
+    # 一条任务有自己的时间预算，且不能突破整轮截止时间。
     deadline = time.monotonic() + _TASK_BUDGET
+    if round_deadline is not None:
+        deadline = min(deadline, round_deadline)
     try:
         files, pack, why, confirmed = _scope_to_pack(session, task, offline or {}, deadline)
     except TimeoutError as exc:
@@ -560,6 +573,11 @@ def _organize_one(task, session, library, config, moves, offline=None) -> None:
     moves.append(decision)
     _close_empty_leftover(task, decision, confirmed, config)
     if decision["action"] == "move":
+        # 大包按文件数追加搬运预算，免得搬一半超预算（杜鹃的婚约 BDRip 这类）。
+        n_nodes = len(decision.get("nodes") or [])
+        deadline = max(deadline, time.monotonic() + _move_budget(config, n_nodes))
+        if round_deadline is not None:
+            deadline = min(deadline, round_deadline)
         show_folder, why = _show_folder(session, library, task.get("show") or "", deadline)
         if why:
             decision["action"] = "leave"
@@ -1869,11 +1887,18 @@ def _subtitle_in_dirs(session, children: list[Node], deadline: float = None) -> 
 
 def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
     """这一包里只有一个正片就用它。多个正片时只留集数对得上的，不对跨包合并。"""
-    videos = _real_videos(files)
-    if len(videos) <= 1:
-        return videos
+    # 只排除有明确花絮标记的文件；全部是花絮时也不能回退为正片。
+    original = _real_videos(files)
+    videos = [item for item in original if not _is_extra_video(item.name)]
     season = int(task.get("season") or 0)
     episode = int(task.get("episode") or 0)
+    if len(videos) <= 1:
+        # 剔除花絮后剩下的正片不能冒充任务所需的另一集。
+        if videos and len(original) > 1 and episode > 0:
+            parsed = _episode_of_name(videos[0].name)
+            if parsed is None or not _same_episode(parsed, season, episode):
+                return []
+        return videos
     if episode > 0:
         named = [item for item in videos if _same_episode(_episode_of_name(item.name), season, episode)]
         if len(named) == 1:
@@ -1901,6 +1926,23 @@ def _real_videos(files: list[Node]) -> list[Node]:
             continue
         found.append(item)
     return found
+
+
+# BD 整包里混着的花絮/宣传视频：不是正片，单集判定时要剔掉，
+# 否则「正片 + PV」会被当成「不止一个视频」整包放下不动。
+# 只认这些明确的标记，不碰正常标题（SPY×FAMILY 里的 SP 不会误判）。
+_EXTRA_VIDEO = re.compile(
+    r"(?<![A-Za-z])(?:PV|CM|MENU|NCOP|NCED)\d*(?=\s*(?:[\].)]|$))|"
+    r"Non[- ]?telop|ノンテロップ|"
+    r"予告|预告|預告|キャラクターPV|ボイスドラマ|Voice\s*Drama|"
+    r"映像特典|メイキング|片頭|片尾",
+    re.IGNORECASE,
+)
+
+
+def _is_extra_video(name: str) -> bool:
+    """是不是花絮/宣传视频（PV、CM、MENU、NCOP/NCED、予告、SP 等）。"""
+    return bool(_EXTRA_VIDEO.search(name or ""))
 
 
 def _title_hits(video: Node, task: dict) -> bool:
@@ -2090,7 +2132,10 @@ def _pack_sidecars(files: list[Node], video: Node) -> list[Node]:
             continue
         if parent_path(item.path) != home:
             continue
-        if _is_subtitle(item.name) or item.name.startswith(stem + ".") or item.name.startswith(stem + " "):
+        # 字幕只由 match_subtitles 按当前集匹配；不能每集都搬整季字幕。
+        if not _is_subtitle(item.name) and _suffix(item.name) not in VIDEO_EXTS and (
+            item.name.startswith(stem + ".") or item.name.startswith(stem + " ")
+        ):
             kept.append(item)
     return kept
 
@@ -2107,13 +2152,17 @@ def _move_name(item: dict, node: Node) -> str:
     video = item.get("video")
     stem = (video.name.rsplit(".", 1)[0] if video is not None else node.name) or node.name
     suffix = _suffix(node.name) or ".ass"
-    name = f"{stem[:200]}{suffix}"
+    # 同主干字幕保留 SC/TC 等原始后缀，避免简繁两份改成同一个名字。
+    if node.name.startswith(stem + "."):
+        return node.name
+    from .anime_subs import language_suffix
+    name = f"{stem[:190]}.{language_suffix(node.name)}{suffix}"
     return name
 
 
 def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "") -> dict:
     # 整包优先：包里多集时按每集自己的集数拆开入库。
-    all_videos = _real_videos(files)
+    all_videos = [item for item in _real_videos(files) if not _is_extra_video(item.name)]
     if len(all_videos) > 1:
         items = _pack_items(all_videos, task, pack_name, files)
         if items:
