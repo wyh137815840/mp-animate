@@ -1990,19 +1990,82 @@ def _real_videos(files: list[Node]) -> list[Node]:
 # 否则「正片 + PV」会被当成「不止一个视频」整包放下不动。
 # 只认这些明确的标记，不碰正常标题（SPY×FAMILY 里的 SP 不会误判）。
 _EXTRA_VIDEO = re.compile(
-    r"(?<![A-Za-z])(?:PV|CM|MENU|NCOP|NCED|Yokoku|Preview|Trailer)\d*(?=\s*(?:[\].)]|$))|"
+    r"(?<![A-Za-z])(?:PV|CM|MENU|NCOP|NCED|OAD|Yokoku|Preview|Trailer)\d*(?=\s*(?:[\].)(]|$))|"
     r"Non[- ]?telop|ノンテロップ|"
     r"予告|预告|預告|キャラクターPV|ボイスドラマ|Voice\s*Drama|"
     r"映像特典|メイキング|片頭|片尾",
     re.IGNORECASE,
 )
 
+# 独立的方括号花絮标签：这种文件整个就是花絮。
+_EXTRA_TAG_ONLY = re.compile(
+    r"\[(?:SP\d*|MENU|Yokoku|Preview|Trailer|预告|特装|特典)\]",
+    re.IGNORECASE,
+)
+
+# 方括号里的花絮说明（[キャラクターPV]、[ボイスドラマ]…）。
+_EXTRA_BRACKET = re.compile(
+    r"\[(?:[^\]】]*(?:キャラクターPV|ボイスドラマ|映像特典|メインニュース|ノンテロップ|"
+    r"予告|特装|特典|Voice\s*Drama)[^\]】]*)\]",
+    re.IGNORECASE,
+)
+
+# 圆括号里的花絮说明（(CM 01)、(PV 02)、(Non-telop Epilogue)…）。
+_EXTRA_PAREN = re.compile(
+    r"\((?:PV|CM|MENU|NCOP|NCED|OAD|Yokoku|Preview|Trailer|预告|特装)[^)]*\)",
+    re.IGNORECASE,
+)
+
+# 只是一枚花絮标记的方括号，不算这一集自己的标题。
+_EXTRA_ONLY_WORD = re.compile(
+    r"^(?:PV|CM|MENU|NCOP|NCED|OAD|SP\d*|Mini\d*|Yokoku|Preview|Trailer)$",
+    re.IGNORECASE,
+)
+
+
+def _content_text(name: str) -> str:
+    """去掉开头的字幕组。内容标记只看剩下的部分，组名不算花絮。"""
+    return re.sub(r"^[\[【][^\]】]{1,40}[\]】]\s*", "", name or "")
+
+
+def _has_title_bracket(name: str) -> bool:
+    """文件名里有没有这一集自己的标题（方括号里的正经剧集名）。
+
+    有的话说明文件是正式的一集，里面的 NCED、PV 之类只是说明这一集带了什么。
+    """
+    for segment in re.findall(r"[\[【]([^\]】]+)[\]】]", name or ""):
+        segment = segment.strip()
+        if len(segment) < 3 or _EXTRA_ONLY_WORD.match(segment):
+            continue
+        if _EXTRA_BRACKET.search(f"[{segment}]"):
+            continue
+        if _pack_is_noise_segment(segment):
+            continue
+        if re.fullmatch(r"[\d\s\-~,.]+", segment):
+            continue
+        if len(segment) < 8 and len(segment.split()) < 2:
+            continue
+        return True
+    return False
+
 
 def _is_extra_video(name: str) -> bool:
     """是不是花絮/宣传视频（PV、CM、MENU、NCOP/NCED、予告、SP 等）。"""
+    text = name or ""
     # Mini/SP 的编号是特别篇编号，不能与正片同号合并成“另一版本”。
-    special = re.search(r"(?<![A-Za-z])(?:Mini|SP)[ _-]*[\[【]?\d+", name or "", re.IGNORECASE)
-    return bool(special or _EXTRA_VIDEO.search(name or ""))
+    special = re.search(r"(?<![A-Za-z])(?:Mini|SP)[ _-]*[\[【]?\d+", text, re.IGNORECASE)
+    if special:
+        return True
+    content = _content_text(text)
+    if _EXTRA_TAG_ONLY.search(content) or _EXTRA_BRACKET.search(content):
+        return True
+    if _EXTRA_PAREN.search(content):
+        return True
+    if _has_title_bracket(content):
+        # 名字里带着这一集自己的标题（[The Sealed Sword Frenzy]），
+        # NCED、PV 之类只是说明这一集里带了什么，不是花絮本体。
+        return False
+    return bool(_EXTRA_VIDEO.search(content))
 
 
 def _title_hits(video: Node, task: dict) -> bool:

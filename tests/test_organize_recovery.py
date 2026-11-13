@@ -276,6 +276,23 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual([i['season'] for i in items], [2, 2])
         self.assertEqual([i['episode'] for i in items], [13, 14])
 
+    def test_extra_detection_on_real_release_names(self):
+        from anime115.anime_jobs import _is_extra_video
+        cases = [
+            ('[1080P][DBD-Raws][Bleach][OVA][02][The Sealed Sword Frenzy][NCED][HEVC-10bit][FLAC].mkv', False),
+            ('[Moozzi2] Mob Psycho 100 II [SP01] NCED - 01 [ EP.01 ] (BD 1920x1080 x.264-10Bit Flac).mkv', True),
+            ('[Moozzi2] Mob Psycho 100 II [SP00] Menu - 01 [ Ver.01 ] (BD 1920x1080 x.264 Flac).mkv', True),
+            ('[Snow-Raws] モブサイコ100 OAD NCOP (BD 1920x1080 HEVC-YUV420P10 FLAC).mkv', True),
+            ('[Beatrice-Raws] Strike the Blood OVA 3 (CM 01) [BDRip 1920x1080 HEVC FLAC].mkv', True),
+            ('[VCB-Studio] Mob Psycho 100 REIGEN (Non-telop Epilogue)[Ma10p_1080p][x265_flac_aac].mkv', True),
+            ('[DAY][女神のカフェテラス][小野白菊キャラクターPV][BDrip][1080P][X264 FLAC].mkv', True),
+            ('[DAY][女神のカフェテラス][第20話 「冗談なんかじゃない」][BDrip][1080P][X264 FLAC].mkv', False),
+            ('[Sub] PV Breakers - 06 [1080p].mkv', False),
+            ('[CM] Show - 01.mkv', False),
+        ]
+        for name, expected in cases:
+            self.assertEqual(_is_extra_video(name), expected, name)
+
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')
