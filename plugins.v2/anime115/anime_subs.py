@@ -121,6 +121,9 @@ def match_subtitles(files, video, episode: int, season: int = 0) -> list:
         sub_stem = stem_of(item.name).casefold()
         if _same_stem(item.name, video_stem) or sub_stem.startswith(video_stem.casefold() + "."):
             take(item)
+    if picked:
+        # 有同主干字幕时，不再把同集号的另一部短篇/另一版本字幕混进来。
+        return picked
     if episode > 0:
         for item in same_dir:
             if episode_of(item.name) == episode:

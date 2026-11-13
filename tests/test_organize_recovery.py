@@ -109,6 +109,21 @@ class RecoveryTest(unittest.TestCase):
         from anime115.anime_jobs import _pack_items
         self.assertEqual(_pack_items(files, {'season': 1, 'title': 'Show [01-03]'}, '/pack/Show [01-12]', files), [])
 
+    def test_alternate_short_series_and_romanized_preview_are_not_main(self):
+        files = [node(f'[Group] Kakkou no {series} [{i:02d}]{s}')
+                 for series in ('Iinazuke', 'Iikagen') for i in (1, 2)
+                 for s in ('.mkv', '.SC.ass', '.TC.ass')]
+        files.append(node('[Group] Kakkou no Iinazuke [Yokoku][01].mkv'))
+        d = _decide_move({'show': '杜鹃的婚约', 'season': 1, 'title': 'Kakkou no Iinazuke [01-24+Mini_01-22]'}, files, '/anime', 'Kakkou no Iinazuke [01-24]')
+        self.assertEqual(len(d['nodes']), 6)
+        self.assertTrue(all('Iinazuke' in n.name and 'Yokoku' not in n.name for n in d['nodes']))
+        self.assertTrue(all(len(i['subs']) == 2 for i in d['items']))
+
+    def test_unknown_mixed_series_pack_is_not_split(self):
+        from anime115.anime_jobs import _pack_items
+        files = [node('Show A - 01.mkv'), node('Show B - 02.mkv')]
+        self.assertEqual(_pack_items(files, {'season': 1}, 'Unknown', files), [])
+
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')

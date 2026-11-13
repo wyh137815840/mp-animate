@@ -1935,7 +1935,7 @@ def _real_videos(files: list[Node]) -> list[Node]:
 # 否则「正片 + PV」会被当成「不止一个视频」整包放下不动。
 # 只认这些明确的标记，不碰正常标题（SPY×FAMILY 里的 SP 不会误判）。
 _EXTRA_VIDEO = re.compile(
-    r"(?<![A-Za-z])(?:PV|CM|MENU|NCOP|NCED)\d*(?=\s*(?:[\].)]|$))|"
+    r"(?<![A-Za-z])(?:PV|CM|MENU|NCOP|NCED|Yokoku|Preview|Trailer)\d*(?=\s*(?:[\].)]|$))|"
     r"Non[- ]?telop|ノンテロップ|"
     r"予告|预告|預告|キャラクターPV|ボイスドラマ|Voice\s*Drama|"
     r"映像特典|メイキング|片頭|片尾",
@@ -2089,6 +2089,23 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
         if explicit is not None:
             explicit_seasons.add(explicit)
         parsed_items.append((video, episode, explicit))
+    # 同一包可能包含另一部短篇（标题不同但编号相同），不能当正片多版本。
+    # 只有任务标题明确匹配唯一的系列主干时才保留它；否则整包留待确认。
+    def core_of(video, episode):
+        text = _PACK_TAGS.sub(" ", video.name.rsplit(".", 1)[0]).strip().rstrip(" -–_")
+        matched = re.search(r"(?<!\d)(\d{1,3})(?:\s+END)?$", text, re.IGNORECASE)
+        if matched and int(matched.group(1)) == episode:
+            text = text[:matched.start()].rstrip(" -–_")
+        return " ".join(text.casefold().split())
+    cores = {core_of(v, e) for v, e, _ in parsed_items}
+    if len(cores) > 1:
+        title = str(task.get("title") or "")
+        matched = {core for core in cores if core and title_matches(title, Show(keyword=core))}
+        if len(matched) != 1:
+            return []
+        keep = next(iter(matched))
+        parsed_items = [(v, e, s) for v, e, s in parsed_items if core_of(v, e) == keep]
+        explicit_seasons = {s for _, _, s in parsed_items if s is not None}
     if len(explicit_seasons) > 1:
         # 文件里写着不同的季，不敢拆
         return []
