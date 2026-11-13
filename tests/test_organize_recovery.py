@@ -102,6 +102,13 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(order, ['2', '3', '1'])
         self.assertTrue(all(t['organize_attempted_at'] > 123 for t in ts))
 
+    def test_partial_pack_resumes_only_with_matching_declared_range(self):
+        files = [node('Show - 01.mkv'), node('Show - 03.mkv')]
+        d = _decide_move({'show': 'Show', 'season': 1, 'title': 'Show [01-03]'}, files, '/anime', '/pack/Show [01-03]')
+        self.assertEqual([i['episode'] for i in d['items']], [1, 3])
+        from anime115.anime_jobs import _pack_items
+        self.assertEqual(_pack_items(files, {'season': 1, 'title': 'Show [01-03]'}, '/pack/Show [01-12]', files), [])
+
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')

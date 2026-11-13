@@ -20,7 +20,7 @@ from .anime_call import (
 )
 from .anime_dmhy import Pick, SearchOptions, select_shows
 from .anime_flatten import Node, apply_proposals, propose
-from .anime_names import Show, _fold_name, _has_episode_range, join_path, name_of, norm, parent_path, parse_episode, safe_dir_name, strip_mount_prefix, title_matches
+from .anime_names import Show, _fold_name, _has_episode_range, join_path, name_of, norm, parent_path, parse_episode, parse_episode_range, safe_dir_name, strip_mount_prefix, title_matches
 from .anime_playurl import PlayUrlError, play_url_for_strm
 from .anime_strm import commit_strm, pickcode_of, strm_relative
 from .anime_subs import (
@@ -2122,8 +2122,12 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
         return []
     numbers = sorted(item["episode"] for item in items)
     if numbers != list(range(numbers[0], numbers[-1] + 1)):
-        # 不连号，更像多版本而不是整包
-        return []
+        # 部分集已搬走后，源目录会有空号。只有任务标题与该包目录明确声明
+        # 同一个范围、且所有文件集数都在范围内时，才继续搬剩余集；不猜编号。
+        declared = parse_episode_range(name_of(pack_name))
+        requested = parse_episode_range(str(task.get("title") or ""))
+        if not declared or declared != requested or not all(declared[0] <= n <= declared[1] for n in numbers):
+            return []
     return sorted(items, key=lambda item: item["episode"])
 
 
