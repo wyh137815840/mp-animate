@@ -59,7 +59,7 @@ class RecoveryTest(unittest.TestCase):
     def test_realistic_pack_moves_each_source_once(self):
         from test_pack_split import _pack_session, _task, PACK
         from anime115.anime_jobs import run_organize
-        files = [Node(f'{PACK}/Show - {i:02d}{s}', f'Show - {i:02d}{s}', False, 1000)
+        files = [Node(f'{PACK}/Kakkou no Iinazuke S2 - {i:02d}{s}', f'Kakkou no Iinazuke S2 - {i:02d}{s}', False, 1000)
                  for i in (1, 2, 3) for s in ('.mkv', '.SC.ass', '.TC.ass')]
         session = _pack_session(files)
         remaining = {n.path for n in files}
@@ -123,6 +123,34 @@ class RecoveryTest(unittest.TestCase):
         from anime115.anime_jobs import _pack_items
         files = [node('Show A - 01.mkv'), node('Show B - 02.mkv')]
         self.assertEqual(_pack_items(files, {'season': 1}, 'Unknown', files), [])
+
+    def test_remaining_short_series_alone_is_not_main(self):
+        from anime115.anime_jobs import _pack_items
+        files = [node('[Group] Kakkou no Iikagen [01].mkv'), node('[Group] Kakkou no Iikagen [02].mkv')]
+        self.assertEqual(_pack_items(files, {'season': 1, 'title': 'Kakkou no Iinazuke [01-24]'}, 'Kakkou no Iinazuke [01-24]', files), [])
+
+    def test_subtitles_use_lan_without_changing_public_video_urls(self):
+        from anime115.anime_jobs import _subtitle_url, _play_url
+        cfg = JobConfig(play_base='https://mp.example/redirect?pickcode={pickcode}&file_name={filename}',
+                        play_base_lan='http://192.168.1.9:3000/redirect?pickcode={pickcode}&file_name={filename}', strm_for='public')
+        self.assertTrue(_play_url(cfg, 'pc', 'file.mkv').startswith('https://mp.example/'))
+        self.assertTrue(_subtitle_url(cfg, 'pc', 'file.SC.ass').startswith('http://192.168.1.9:3000/'))
+        cfg.play_base_lan = ''
+        self.assertTrue(_subtitle_url(cfg, 'pc', 'file.SC.ass').startswith('https://mp.example/'))
+
+    def test_existing_subtitle_is_not_downloaded_or_overwritten(self):
+        import tempfile
+        from unittest.mock import patch
+        from anime115.anime_jobs import _apply_subtitles
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / 'Show' / 'S01E01.zh-CN.ass'
+            p.parent.mkdir(); p.write_text('existing valid subtitle')
+            sub = Node('/cloud/Show.SC.ass', 'Show.SC.ass', False, 100, raw={'pc': 'pc'})
+            cfg = JobConfig(strm_root=folder, play_base='http://example/redirect?pickcode={pickcode}', subtitle_enabled=True)
+            with patch('anime115.anime_jobs.fetch_bytes') as fetch:
+                _apply_subtitles({}, [sub], cfg, 'Show/S01E01.strm', write=True)
+                fetch.assert_not_called()
+            self.assertEqual(p.read_text(), 'existing valid subtitle')
 
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative

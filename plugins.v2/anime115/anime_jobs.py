@@ -2093,12 +2093,13 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
     # 只有任务标题明确匹配唯一的系列主干时才保留它；否则整包留待确认。
     def core_of(video, episode):
         text = _PACK_TAGS.sub(" ", video.name.rsplit(".", 1)[0]).strip().rstrip(" -–_")
+        text = re.sub(r"\bS\d{1,2}E\d{1,3}\b", "", text, flags=re.IGNORECASE).strip().rstrip(" -–_")
         matched = re.search(r"(?<!\d)(\d{1,3})(?:\s+END)?$", text, re.IGNORECASE)
         if matched and int(matched.group(1)) == episode:
             text = text[:matched.start()].rstrip(" -–_")
         return " ".join(text.casefold().split())
     cores = {core_of(v, e) for v, e, _ in parsed_items}
-    if len(cores) > 1:
+    if len(cores) > 1 or (cores and str(task.get("title") or "").strip()):
         title = str(task.get("title") or "")
         matched = {core for core in cores if core and title_matches(title, Show(keyword=core))}
         if len(matched) != 1:
@@ -2360,7 +2361,7 @@ def _apply_subtitles(decision: dict, subs: list, config: JobConfig, relative: st
             target["sub_error"] = "字幕缺少 pickcode"
             continue
         try:
-            url = _play_url(config, code, node.name)
+            url = _subtitle_url(config, code, node.name)
         except PlayUrlError as exc:
             target["sub_error"] = str(exc)
             continue
@@ -2369,6 +2370,10 @@ def _apply_subtitles(decision: dict, subs: list, config: JobConfig, relative: st
             written.append(str(Path(root) / sub_relative))
             continue
         try:
+            existing = Path(root) / sub_relative
+            if existing.is_file() and existing.stat().st_size > 0:
+                written.append(str(existing))
+                continue
             data = unpack(fetch_bytes(url), node.name)
             path = write_sidecar(root, sub_relative, data)
         except Exception as exc:
@@ -2629,6 +2634,20 @@ def _play_url(config: JobConfig, pickcode: str, filename: str) -> str:
         filename,
         play_base_lan=config.play_base_lan,
         strm_for=config.strm_for,
+        public_hosts=config.public_hosts,
+    )
+
+
+def _subtitle_url(config: JobConfig, pickcode: str, filename: str) -> str:
+    """本机下载字幕优先走已配置的 LAN 入口，不跟随 STRM 的公网播放模式。
+
+    视频 STRM 的公网地址保持不变；没有配置 LAN 时沿用原播放模板。
+    """
+    if not str(config.play_base_lan or "").strip():
+        return _play_url(config, pickcode, filename)
+    return play_url_for_strm(
+        config.play_base, pickcode, filename,
+        play_base_lan=config.play_base_lan, strm_for="lan",
         public_hosts=config.public_hosts,
     )
 
