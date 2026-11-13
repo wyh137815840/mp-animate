@@ -168,6 +168,37 @@ class RecoveryTest(unittest.TestCase):
         self.assertFalse(ass_title_matches(b'[Script Info]\nTitle: [Group] Kakkou no Iinazuke [09][BDRip].SC', main))
         self.assertTrue(ass_title_matches(b'[Script Info]\nTitle: Default Aegisub file', main))
 
+    def test_nested_probe_prefers_name_matching_directory(self):
+        from anime115.anime_jobs import _choose_by_nested_id
+        from anime115.anime_flatten import Node
+        probes = []
+
+        class _S:
+            def list_dir(self, path):
+                probes.append(path)
+                if path == '/inbox/[Group] Wanted - 04':
+                    return [Node(path + '/wanted.mkv', 'wanted.mkv', False, 1, raw={'file_id': 'fid-1'})]
+                return []
+        children = [Node('/inbox/Other Pack - 01', 'Other Pack - 01', True),
+                    Node('/inbox/[Group] Wanted - 04', '[Group] Wanted - 04', True),
+                    Node('/inbox/Third - 02', 'Third - 02', True)]
+        chosen, why = _choose_by_nested_id(_S(), children, 'fid-1', None, ['[Group] Wanted - 04'])
+        self.assertEqual(chosen.name, '[Group] Wanted - 04')
+        self.assertEqual(probes[0], '/inbox/[Group] Wanted - 04')
+        self.assertEqual(why, '')
+
+    def test_stall_reason_is_recorded_on_the_task(self):
+        from anime115.anime_jobs import run_organize
+        from test_pack_split import _Session
+        session = _Session()
+        session.offline = [{'info_hash': 'f' * 40, 'status': 2}]
+        task = {'infohash': 'f' * 40, 'show': '佐藤同学', 'season': 1, 'episode': 3,
+                'title': '佐藤同学 - 03', 'folder': '/inbox', 'status': 'submitted'}
+        result = run_organize([task], session, JobConfig(dry_run=False, library_root='/动漫'))
+        self.assertEqual(result['moves'][0]['action'], 'leave')
+        self.assertTrue(task.get('organize_reason'))
+        self.assertIn('organize_checked_at', task)
+
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')

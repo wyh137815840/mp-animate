@@ -519,6 +519,7 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
             return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         task, offline = pair
         task["organize_attempted_at"] = time.time()
+        task.pop("organize_reason", None)
         try:
             _organize_one(task, session, library, config, moves, offline, round_deadline=started + ROUND_BUDGET)
         except JobStopped:
@@ -570,10 +571,16 @@ def _organize_one(task, session, library, config, moves, offline=None, round_dea
         })
         return
     if why:
+        task["organize_reason"] = why
+        task["organize_checked_at"] = time.time()
         moves.append({"action": "leave", "reason": why, "task": task.get("infohash"), "nodes": [], "pack": pack})
         return
     decision = _decide_move(task, files, library, pack)
     decision["pack"] = pack
+    if decision.get("action") != "move":
+        # 记下这一条为什么没搬成，汇报时能区分「包没落地」和「真的卡住」。
+        task["organize_reason"] = str(decision.get("reason") or decision.get("error") or "")
+        task["organize_checked_at"] = time.time()
     moves.append(decision)
     _close_empty_leftover(task, decision, confirmed, config)
     if decision["action"] == "move":
@@ -1405,7 +1412,7 @@ def _scope_to_pack(session, task: dict, offline: dict, deadline: float = None) -
     if why:
         return [], "", why, False
     if chosen is None and file_id:
-        chosen, why = _choose_by_nested_id(session, children, file_id, deadline)
+        chosen, why = _choose_by_nested_id(session, children, file_id, deadline, wanted)
     if why:
         return [], "", why, False
     if chosen is not None:
@@ -1819,16 +1826,27 @@ def _choose_child(children: list[Node], wanted: list[str], file_id: str, episode
     return None, ""
 
 
-def _choose_by_nested_id(session, children: list[Node], file_id: str, deadline: float = None) -> tuple[Node | None, str]:
+def _choose_by_nested_id(session, children: list[Node], file_id: str, deadline: float = None,
+                         wanted: list[str] = None) -> tuple[Node | None, str]:
     """file_id 有时是外壳里面的正片，而不是外壳自己。
 
     收件箱里目录多的时候不能一个个试下去，最多探 _NESTED_PROBE_LIMIT 个。
+    先探名字对得上的目录，通常一两次就能找到，省下大量列目录请求。
     """
+    directories = [item for item in children if item.is_dir]
+    likely = []
+    rest = []
+    for directory in directories:
+        if wanted and any(
+            _name_hit(directory.name, name, "exact") or _name_hit(directory.name, name, "partial")
+            for name in wanted
+        ):
+            likely.append(directory)
+        else:
+            rest.append(directory)
     owners = []
     probes = 0
-    for directory in children:
-        if not directory.is_dir:
-            continue
+    for directory in [*likely, *rest]:
         if probes >= _NESTED_PROBE_LIMIT:
             _job_log(f"动漫 115 找这一包只探了 {_NESTED_PROBE_LIMIT} 个目录，先记找不到", "warning")
             break
