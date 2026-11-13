@@ -74,6 +74,32 @@ class _Cookie:
         return []
 
 
+class _LoggedOut:
+    """开放平台：access_token 失效，登录检查直接说没登录。"""
+
+    def __init__(self):
+        self.added = []
+
+    def check_login(self):
+        return False
+
+    def sleep(self, _seconds):
+        return None
+
+    def quota(self):
+        return {"data": {"surplus": 3}}
+
+    def ensure_dir(self, path):
+        return type("Folder", (), {"fileid": "99", "path": path})()
+
+    def add_offline(self, magnet, _fileid):
+        self.added.append(magnet)
+        return {"state": True, "code": 0, "data": {"wp_path_id": "99"}}
+
+    def list_dir(self, _path):
+        return []
+
+
 class FairOrderTest(unittest.TestCase):
     """候选按剧轮流排，剧多了也不会全被前面那几部占满额度。"""
 
@@ -105,6 +131,18 @@ class DailyFallbackTest(unittest.TestCase):
         self.assertEqual(len(result["submitted"]), 1)
         self.assertEqual(len(cookie.added), 1)
         self.assertEqual(blocked.added, [])
+
+    def test_falls_back_to_cookie_when_open_platform_logged_out(self):
+        """开放平台 refresh_token 失效时也要能用 Cookie 通道提交，不能整轮不做。"""
+        show = parse_watchlist("佐藤同学")[0]
+        out = _LoggedOut()
+        cookie = _Cookie()
+        result = run_daily([show], out, lambda _show: [self._torrent()], {}, NOW,
+                           JobConfig(dry_run=False), fallback_session=cookie)
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(len(result["submitted"]), 1)
+        self.assertEqual(len(cookie.added), 1)
+        self.assertEqual(out.added, [])
 
     def test_without_fallback_reports_error(self):
         show = parse_watchlist("佐藤同学")[0]

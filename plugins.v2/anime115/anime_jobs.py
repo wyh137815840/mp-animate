@@ -346,7 +346,19 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
     except TimeoutError as exc:
         return {"ok": False, "error": f"115 登录检查超时：{exc}", "picks": [], "dry_run": False, "inbox": inbox}
     if not logged_in:
-        return {"ok": False, "error": "115 未登录", "picks": [], "dry_run": False}
+        # 开放平台的 access_token 失效时（refresh_token 无效），改用 Cookie 通道。
+        if fallback_session is None:
+            return {"ok": False, "error": "115 未登录", "picks": [], "dry_run": False}
+        _job_log("动漫 115 开放平台未登录，改用 Cookie 通道提交", "warning")
+        session = fallback_session
+        try:
+            logged_in = _call(session, session.check_login)
+        except JobStopped:
+            return _daily_stopped(config, inbox, chosen, notes, [])
+        except TimeoutError:
+            logged_in = True
+        if not logged_in:
+            return {"ok": False, "error": "115 未登录", "picks": [], "dry_run": False}
     try:
         quota = _quota_left(_call(session, session.quota))
     except JobStopped:
