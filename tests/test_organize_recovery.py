@@ -78,6 +78,30 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(len(session.moves), 9)
         self.assertEqual(remaining, set())
 
+    def test_mini_and_sp_are_not_regular_versions(self):
+        files = [node('Show - 01.mkv'), node('Show - 02.mkv'),
+                 node('Show Mini [01].mkv'), node('Show - SP02.mkv')]
+        d = _decide_move({'show': 'Show', 'season': 1}, files, '/anime', 'Show 01-02 + Mini')
+        self.assertEqual(len(d['nodes']), 2)
+        self.assertTrue(all(len(i['videos']) == 1 for i in d['items']))
+
+    def test_organizer_attempts_unvisited_tasks_before_old_collisions(self):
+        from test_pack_split import _Session
+        from anime115.anime_jobs import run_organize
+        from unittest.mock import patch
+        ts = [{'infohash': str(i) * 40, 'status': 'submitted', 'organize_attempted_at': t}
+              for i, t in ((1, 123), (2, 0), (3, 50))]
+        session = _Session()
+        session.offline = [{'info_hash': t['infohash'], 'status': 2} for t in ts]
+        order = []
+        def organize(t, session, library, config, moves, offline, round_deadline=None):
+            order.append(t['infohash'][0])
+            moves.append({'action': 'leave', 'reason': 'collision'})
+        with patch('anime115.anime_jobs._organize_one', side_effect=organize):
+            run_organize(ts, session, JobConfig(dry_run=False, library_root='/anime'))
+        self.assertEqual(order, ['2', '3', '1'])
+        self.assertTrue(all(t['organize_attempted_at'] > 123 for t in ts))
+
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')

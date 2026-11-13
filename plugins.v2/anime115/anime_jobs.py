@@ -502,6 +502,8 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
             continue
         if complete:
             work.append((task, {}))
+    # 上轮耗时/不确定的任务不能永远占着队首，让未尝试的大包也轮得到。
+    work.sort(key=lambda pair: float(pair[0].get("organize_attempted_at") or 0))
     moves = []
     organized = skipped = failed = 0
     started = time.monotonic()
@@ -515,6 +517,7 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
             _job_log("动漫 115 整理超过时间预算，剩下的任务留到下一轮", "warning")
             return _organize_status(config, [*pending, *moves], stopped=True, dirty=True, tasks=tasks, seen=seen)
         task, offline = pair
+        task["organize_attempted_at"] = time.time()
         try:
             _organize_one(task, session, library, config, moves, offline, round_deadline=started + ROUND_BUDGET)
         except JobStopped:
@@ -1942,7 +1945,9 @@ _EXTRA_VIDEO = re.compile(
 
 def _is_extra_video(name: str) -> bool:
     """是不是花絮/宣传视频（PV、CM、MENU、NCOP/NCED、予告、SP 等）。"""
-    return bool(_EXTRA_VIDEO.search(name or ""))
+    # Mini/SP 的编号是特别篇编号，不能与正片同号合并成“另一版本”。
+    special = re.search(r"(?<![A-Za-z])(?:Mini|SP)[ _-]*[\[【]?\d+", name or "", re.IGNORECASE)
+    return bool(special or _EXTRA_VIDEO.search(name or ""))
 
 
 def _title_hits(video: Node, task: dict) -> bool:
