@@ -228,6 +228,23 @@ class RecoveryTest(unittest.TestCase):
                  node('[DAY][女神のカフェテラス][第22話][BDrip].mkv')]
         self.assertEqual(_pack_items(files, {'season': 2}, '女神的露天咖啡厅S1+S2[BD]', files), [])
 
+    def test_series_labels_survive_real_release_names(self):
+        from anime115.anime_jobs import _pack_label_in, _pack_series_labels
+        cases = [
+            ('[Nekomoe kissaten][Goblin Slayer][12END][1080p][CHS].mp4',
+             '[Nekomoe kissaten][Goblin Slayer][01-12END][1080p][CHS]', True),
+            ('[Nekomoe kissaten] Kakkou no Iikagen [08][BDRip 1080p HEVC-10bit AAC].mkv',
+             '[Nekomoe kissaten][Kakkou no Iinazuke][BDRip]', False),
+            ('[DAY][女神のカフェテラス][第20話][BDrip][1080P][X264 FLAC].mkv',
+             '[DAY字幕组][女神的露天咖啡厅][BD][简日双语][BDrip][1080P][MKV][FLAC]', True),
+            ('[八重樱字幕组][噬血狂袭OVAIV][Strike the Blood OVA IV][01][1080P][简体].mp4',
+             '[八重樱字幕组][噬血狂袭OVAIV][01-04][1080P][简体]', True),
+        ]
+        for name, pack, expected in cases:
+            labels = _pack_series_labels(name)
+            hit = any(_pack_label_in(pack, label) for label in labels)
+            self.assertEqual(hit, expected, f'{name} -> {labels}')
+
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')

@@ -2113,6 +2113,69 @@ def _pack_episode_full(name: str) -> int:
     return 0
 
 
+def _pack_group_segment(name: str) -> str:
+    """文件名开头方括号里的字幕组。组名不是剧名，不作为比对依据。"""
+    matched = re.match(r"^[\[【]([^\]】]{1,40})[\]】]", name or "")
+    return matched.group(1) if matched else ""
+
+
+def _pack_is_noise_segment(segment: str) -> bool:
+    """方括号里这一段是不是技术标签或集数标记。"""
+    text = segment or ""
+    if re.fullmatch(r"\d{1,3}(?:v\d+)?", text.strip()):
+        # 纯数字的方括号是集数，不是剧名。
+        return True
+    if _PACK_RANGE_RE.search(text):
+        return True
+    if re.search(r"(?i)(?:第\s*\d+\s*[话話集]|ep(?:isode)?\s*\d+|\d{1,3}\s*end|\b(?:ova|oad|sp|mini)\d*\b)", text):
+        return True
+    latin, cjk = _pack_words(text)
+    if not cjk and all(_pack_is_noise(token) for token in latin):
+        return True
+    if cjk and any(word in text for word in _PACK_CJK_NOISE):
+        return True
+    return False
+
+
+def _pack_series_labels(name: str) -> list[str]:
+    """从文件名里取出可能的剧名写法：去掉字幕组、技术标签和集数。"""
+    text = name or ""
+    if "." in text:
+        text = text.rsplit(".", 1)[0]
+    group = _pack_group_segment(name)
+    body = text
+    if group:
+        body = re.sub(r"^[\[【]" + re.escape(group) + r"[\]】]\s*", "", body)
+    labels = []
+    for segment in re.findall(r"[\[【]([^\]】]+)[\]】]", body):
+        segment = segment.strip()
+        if len(segment) < 2 or _pack_is_noise_segment(segment):
+            continue
+        labels.append(segment)
+    cleaned = _PACK_TAGS.sub(" ", body)
+    cleaned = re.sub(r"(?i)\b(?:s\d{1,2}e\d{1,3}|ova\d*|oad|sp\d*|mini)\b", " ", cleaned)
+    cleaned = re.sub(r"(?i)\s+end\b", " ", cleaned)
+    cleaned = re.sub(r"(?i)\s+s\d{1,2}\b", " ", cleaned)
+    cleaned = re.sub(r"(?:\s*[-–]\s*|\s+)\d{1,3}(?:\.\d+)?\s*$", " ", cleaned)
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) >= 2:
+        labels.append(cleaned)
+    return labels
+
+
+def _pack_label_in(target: str, label: str) -> bool:
+    """这一段剧名写法在目标名字里出现吗。"""
+    if not target or not label:
+        return False
+    if title_matches(target, Show(keyword=label)):
+        return True
+    # 中日文发布名常有差异（「女神のカフェテラス」对「女神的露天咖啡厅」），
+    # 开头汉字对得上就当同一部；罗马字必须完整出现。
+    chunks = _PACK_CJK_RE.findall(label)
+    head = "".join(chunks)[:2]
+    return len(head) >= 2 and head in target
+
+
 def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node]) -> list[dict]:
     """整包：按每个视频自己文件名里的集数，拆成一集一项。
 
@@ -2133,24 +2196,18 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
         if explicit is not None:
             explicit_seasons.add(explicit)
         parsed_items.append((video, episode, explicit))
-    # 同一包可能包含另一部短篇（标题不同但编号相同），不能当正片多版本。
-    # 只有任务标题明确匹配唯一的系列主干时才保留它；否则整包留待确认。
-    def core_of(video, episode):
-        text = _PACK_TAGS.sub(" ", video.name.rsplit(".", 1)[0]).strip().rstrip(" -–_")
-        text = re.sub(r"\bS\d{1,2}E\d{1,3}\b", "", text, flags=re.IGNORECASE).strip().rstrip(" -–_")
-        matched = re.search(r"(?<!\d)(\d{1,3})(?:\s+END)?$", text, re.IGNORECASE)
-        if matched and int(matched.group(1)) == episode:
-            text = text[:matched.start()].rstrip(" -–_")
-        return " ".join(text.casefold().split())
-    cores = {core_of(v, e) for v, e, _ in parsed_items}
-    if len(cores) > 1 or (cores and str(task.get("title") or "").strip()):
-        title = str(task.get("title") or "")
-        matched = {core for core in cores if core and title_matches(title, Show(keyword=core))}
-        if len(matched) != 1:
-            return []
-        keep = next(iter(matched))
-        parsed_items = [(v, e, s) for v, e, s in parsed_items if core_of(v, e) == keep]
-        explicit_seasons = {s for _, _, s in parsed_items if s is not None}
+    # 同一包可能混入另一部作品（标题不同但编号相同），不能当正片多版本。
+    # 只保留剧名与包名或任务标题对得上的那些文件；对不上的整包留下不动。
+    targets = [pack_name or "", str(task.get("title") or "")]
+    labels_by_item = [[label for label in _pack_series_labels(item[0].name)
+                       if any(_pack_label_in(target, label) for target in targets)]
+                      for item in parsed_items]
+    if not any(labels_by_item):
+        # 一个都认不出来：这一包和这一集对不上，宁可留在原地。
+        return []
+    keep_index = {index for index, labels in enumerate(labels_by_item) if labels}
+    parsed_items = [item for index, item in enumerate(parsed_items) if index in keep_index]
+    explicit_seasons = {s for _, _, s in parsed_items if s is not None}
     if len(explicit_seasons) > 1:
         # 文件里写着不同的季，不敢拆
         return []
