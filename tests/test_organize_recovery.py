@@ -276,6 +276,25 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual([i['season'] for i in items], [2, 2])
         self.assertEqual([i['episode'] for i in items], [13, 14])
 
+    def test_file_without_season_marker_uses_task_season(self):
+        from anime115.anime_jobs import _decide_move
+        files = [node('[DMG][Re Zero][32][1080P][GB].mp4')]
+        d = _decide_move({'show': 'Re：从零开始的异世界生活', 'season': 3, 'episode': 32,
+                           'title': '[DMG][Re Zero][32+SP32][1080P][GB][MP4]'}, files, '/anime',
+                          'Re Zero [32+SP32]')
+        self.assertEqual(d['action'], 'move')
+        self.assertEqual((d['season'], d['episode']), (3, 32))
+
+    def test_video_without_any_episode_number_is_not_moved(self):
+        """文件和标题都认不出集数时不要照抄任务集号（会放错集）。"""
+        from anime115.anime_jobs import _decide_move
+        files = [node('[Snow-Raws] ストライク・ザ・ブラッド 消えた聖槍篇 (BD FLACx2).mkv')]
+        d = _decide_move({'show': '噬血狂袭', 'season': 1, 'episode': 2,
+                           'title': '[Snow-Raws] 噬血狂袭 消失的圣枪篇 (BD FLACx2)'}, files, '/anime',
+                          '消えた聖槍篇')
+        self.assertEqual(d['action'], 'leave')
+        self.assertEqual(d['reason'], 'uncertain')
+
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
         cases = [
@@ -289,6 +308,10 @@ class RecoveryTest(unittest.TestCase):
             ('[DAY][女神のカフェテラス][第20話 「冗談なんかじゃない」][BDrip][1080P][X264 FLAC].mkv', False),
             ('[Sub] PV Breakers - 06 [1080p].mkv', False),
             ('[CM] Show - 01.mkv', False),
+            ('[Snow-Raws] ストライク・ザ・ブラッド 消えた聖槍篇 ED (BD 1920x1080 HEVC-YUV420P10 FLAC).mkv', True),
+            ('[Snow-Raws] ストライク・ザ・ブラッド 消えた聖槍篇 (BD 1920x1080 HEVC-YUV420P10 FLACx2).mkv', False),
+            ('[VCB-Studio] Mob Psycho 100 REIGEN [Non-telop Epilogue][Ma10p_1080p][x265_flac_aac].mkv', True),
+            ('[VCB-Studio] Mob Psycho 100 REIGEN [Ma10p_1080p][x265_flac_aac].mkv', False),
         ]
         for name, expected in cases:
             self.assertEqual(_is_extra_video(name), expected, name)

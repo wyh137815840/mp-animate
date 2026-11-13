@@ -1402,12 +1402,21 @@ def _is_subtitle(name: str) -> bool:
     return _suffix(name) in SUB_EXTS
 
 
-def _episode_of_name(name: str) -> tuple[int, int] | None:
-    """目录名常以 .mkv 结尾。去掉这一层再认集数。"""
+def _episode_of_name(name: str, default_season: int = 0) -> tuple[int, int] | None:
+    """目录名常以 .mkv 结尾。去掉这一层再认集数。
+
+    文件名里没写季号时，按订阅给的季算（default_season），
+    否则「第32话」这种文件会被当成第一季，和任务对不上。
+    """
     text = name or ""
     if _suffix(text) in VIDEO_EXTS or _suffix(text) in SUB_EXTS:
         text = text.rsplit(".", 1)[0]
-    return parse_episode(text)
+    parsed = parse_episode(text)
+    if parsed is None:
+        return None
+    if default_season > 0 and _explicit_season(text) is None:
+        return (default_season, parsed[1])
+    return parsed
 
 
 def _scope_to_pack(session, task: dict, offline: dict, deadline: float = None) -> tuple[list[Node], str, str, bool]:
@@ -1953,12 +1962,13 @@ def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
     if len(videos) <= 1:
         # 剔除花絮后剩下的正片不能冒充任务所需的另一集。
         if videos and len(original) > 1 and episode > 0:
-            parsed = _episode_of_name(videos[0].name)
+            parsed = _episode_of_name(videos[0].name, season)
             if parsed is None or not _same_episode(parsed, season, episode):
                 return []
         return videos
     if episode > 0:
-        named = [item for item in videos if _same_episode(_episode_of_name(item.name), season, episode)]
+        named = [item for item in videos
+                 if _same_episode(_episode_of_name(item.name, season), season, episode)]
         if len(named) == 1:
             return named
         titled = [item for item in named if _title_hits(item, task)]
@@ -1990,7 +2000,7 @@ def _real_videos(files: list[Node]) -> list[Node]:
 # 否则「正片 + PV」会被当成「不止一个视频」整包放下不动。
 # 只认这些明确的标记，不碰正常标题（SPY×FAMILY 里的 SP 不会误判）。
 _EXTRA_VIDEO = re.compile(
-    r"(?<![A-Za-z])(?:PV|CM|MENU|NCOP|NCED|OAD|Yokoku|Preview|Trailer)\d*(?=\s*(?:[\].)(]|$))|"
+    r"(?<![A-Za-z])(?:PV|CM|MENU|NCOP|NCED|ED|OP|OAD|Yokoku|Preview|Trailer)\d*(?=\s*(?:[\].)(]|$))|"
     r"Non[- ]?telop|ノンテロップ|"
     r"予告|预告|預告|キャラクターPV|ボイスドラマ|Voice\s*Drama|"
     r"映像特典|メイキング|片頭|片尾",
@@ -2006,19 +2016,19 @@ _EXTRA_TAG_ONLY = re.compile(
 # 方括号里的花絮说明（[キャラクターPV]、[ボイスドラマ]…）。
 _EXTRA_BRACKET = re.compile(
     r"\[(?:[^\]】]*(?:キャラクターPV|ボイスドラマ|映像特典|メインニュース|ノンテロップ|"
-    r"予告|特装|特典|Voice\s*Drama)[^\]】]*)\]",
+    r"Non[- ]?telop|Epilogue|エピローグ|予告|特装|特典|Voice\s*Drama)[^\]】]*)\]",
     re.IGNORECASE,
 )
 
 # 圆括号里的花絮说明（(CM 01)、(PV 02)、(Non-telop Epilogue)…）。
 _EXTRA_PAREN = re.compile(
-    r"\((?:PV|CM|MENU|NCOP|NCED|OAD|Yokoku|Preview|Trailer|预告|特装)[^)]*\)",
+    r"\((?:PV|CM|MENU|NCOP|NCED|ED|OP|OAD|Yokoku|Preview|Trailer|预告|特装)[^)]*\)",
     re.IGNORECASE,
 )
 
 # 只是一枚花絮标记的方括号，不算这一集自己的标题。
 _EXTRA_ONLY_WORD = re.compile(
-    r"^(?:PV|CM|MENU|NCOP|NCED|OAD|SP\d*|Mini\d*|Yokoku|Preview|Trailer)$",
+    r"^(?:PV|CM|MENU|NCOP|NCED|ED|OP|OAD|SP\d*|Mini\d*|Yokoku|Preview|Trailer)$",
     re.IGNORECASE,
 )
 
@@ -2449,9 +2459,13 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
         listed = "、".join(item.name for item in videos[:8])
         return {"action": "leave", "reason": f"不止一个视频：{listed}", "task": task.get("infohash"), "nodes": []}
     video = videos[0]
-    parsed = parse_episode(video.name) or parse_episode(task.get("title") or "")
+    task_season = int(task.get("season") or 0)
+    parsed = _episode_of_name(video.name, task_season)
     if parsed is None:
-        parsed = (int(task.get("season") or 0), int(task.get("episode") or 0))
+        # 文件名里没有集数：只能靠任务标题认，标题也没有就说明这一集认不准。
+        parsed = _episode_of_name(str(task.get("title") or ""), task_season)
+    if parsed is None:
+        return {"action": "leave", "reason": "uncertain", "task": task.get("infohash"), "nodes": []}
     season, episode = parsed
     if season <= 0 or episode <= 0:
         return {"action": "leave", "reason": "uncertain", "task": task.get("infohash"), "nodes": []}
