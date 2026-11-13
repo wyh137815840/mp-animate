@@ -798,6 +798,13 @@ class JobTest(unittest.TestCase):
         self.assertNotIn("{filename}", url)
         self.assertTrue(episode_strm_name("剧 (2026)", 1, 5, "剧 (2026) - S01E05 - 已有.mkv").startswith("剧 (2026) - S01E05"))
 
+    def test_play_url_encodes_spaces_in_filename(self):
+        """文件名里的空格必须编码：MediaWarp 302 直链后是客户端自己去拉这个地址。"""
+        url = build_play_url(PLAY_BASE, "abcDEF1234567890x", "[LoliHouse] Kokoore - 08 [WebRip 1080p HEVC].mkv")
+        self.assertNotIn(" ", url)
+        self.assertIn("%20", url)
+        self.assertIn("%5BLoliHouse%5D", url)
+
     def test_lan_strm_mode_does_not_write_public_domain(self):
         show = "冷淡的佐藤同学只对我撒娇 (2026)"
         video = "[LoliHouse] Shiotaiou - 05 [WebRip].mkv"
@@ -1438,7 +1445,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.59")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.60")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):

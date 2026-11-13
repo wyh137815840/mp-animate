@@ -18,7 +18,9 @@ def build_play_url(play_base: str, pickcode: str, filename: str) -> str:
     """和 115 AV刮削一样，把 {pickcode}、{filename} 填进播放模板。"""
     template = (play_base or "").strip()
     code = quote((pickcode or "").strip(), safe=".-_")
-    name = quote((filename or "video").strip() or "video", safe=".-_()[] ")
+    # 文件名里的空格必须编码成 %20：以前 strm 地址是服务器自己去拉，HTTP 库会顺手编码；
+    # 现在（MediaWarp 302 直链）是手机/客户端自己去拉，URL 里带裸空格或裸方括号很多客户端会直接报错。
+    name = quote((filename or "video").strip() or "video", safe=".-_")
     if "{pickcode}" in template or "{filename}" in template or "{file_name}" in template:
         return (
             template.replace("{pickcode}", code)
