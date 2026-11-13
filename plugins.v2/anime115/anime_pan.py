@@ -204,11 +204,15 @@ class Pan115:
             self._dirs[path] = found
             return found
         search_error = None
-        try:
-            found = _match_dir(self.search(name), name, parent, searched=True)
-        except RuntimeError as exc:
-            found = ""
-            search_error = exc
+        if self._blocked_until and time.monotonic() < self._blocked_until:
+            # 115 正在挡我们，别再一个目录一个目录地去搜，等冷却过去再说。
+            search_error = RuntimeError("115 列目录接口被挡，冷却中")
+        else:
+            try:
+                found = _match_dir(self.search(name), name, parent, searched=True)
+            except RuntimeError as exc:
+                found = ""
+                search_error = exc
         if found:
             self._dirs[path] = found
             return found
