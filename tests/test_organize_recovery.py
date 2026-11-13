@@ -295,6 +295,16 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(d['action'], 'leave')
         self.assertEqual(d['reason'], 'uncertain')
 
+    def test_move_budget_scales_with_file_count(self):
+        from anime115.anime_jobs import JobConfig, _move_budget
+        config = JobConfig(move_gap_seconds=2)
+        small = _move_budget(config, 2)
+        big = _move_budget(config, 12)
+        self.assertLess(small, big)
+        # 115 慢时一次搬运要 8-10 秒，12 个文件的预算必须够搬完
+        self.assertGreaterEqual(big, 120)
+        self.assertLessEqual(_move_budget(config, 500), 900)
+
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
         cases = [

@@ -45,7 +45,9 @@ _SHOW_YEAR = re.compile(r"^(.+?)\s*[(（](\d{4})[)）](?:\s*\{tmdb-\d+\})?$")
 _OFFLINE_CALL_TIMEOUT = OFFLINE_TIMEOUT
 _STORAGE_CALL_TIMEOUT = STORAGE_TIMEOUT
 # 扫描单条任务的预算；大包搬运另按文件数分配有限预算（见 _move_budget）。
-_TASK_BUDGET = 120
+# 115 慢的时候一次 move 要 8-10 秒，12 集的大包光搬运就上百秒，
+# 预算太紧会让大包每次都卡在搬运中途，一集也搬不进来。
+_TASK_BUDGET = 360
 # 找 file_id 时最多探几个目录。收件箱里目录多的时候不能一个个试下去。
 _NESTED_PROBE_LIMIT = 20
 
@@ -105,11 +107,12 @@ def _move_budget(config: JobConfig, n_nodes: int) -> float:
     """按要搬的文件数给搬运时间。每个文件预留搬运间隔加一次调用的余量。
 
     大包（整季 + 外挂字幕）文件多，固定预算会搬一半就超时；这里按文件数放宽，
-    封顶 600 秒，并由调用者约束在整轮截止时间内。
+    封顶 900 秒，并由调用者约束在整轮截止时间内。
+    115 响应慢时一次调用要 8-10 秒，所以每个文件的余量给得比间隔宽。
     """
     gap = max(0, int(getattr(config, "move_gap_seconds", 2) or 0))
-    needed = 60 + max(0, n_nodes) * (gap + 4)
-    return float(min(600, needed))
+    needed = 60 + max(0, n_nodes) * (gap + 12)
+    return float(min(900, needed))
 
 
 def _list_dir(session, path: str, deadline: float = None) -> list:
