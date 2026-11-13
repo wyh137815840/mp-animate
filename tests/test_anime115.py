@@ -717,7 +717,7 @@ class JobTest(unittest.TestCase):
             text = paths[0].read_text(encoding="utf-8").strip()
             self.assertIn("pickcode=", text)
             self.assertIn("file_name=", text)
-            self.assertTrue(text.startswith("https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url"))
+            self.assertTrue(text.startswith("https://mp.yuanhot.top:8443/api/v1/plugin/P115StrmHelper/redirect_url"))
             self.assertFalse(list(Path(tmp).rglob("*.nfo")))
             self.assertFalse(list(Path(tmp).rglob("*.jpg")))
         with tempfile.TemporaryDirectory() as preview_root:
@@ -1445,7 +1445,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.66")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.67")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):

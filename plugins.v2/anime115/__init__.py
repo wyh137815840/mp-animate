@@ -15,7 +15,15 @@ from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
-from .anime_config import PLAY_BASE, PLAY_BASE_LAN, offline_directory, organize_schedule, scheduled_jobs, usable_cookie
+from .anime_config import (
+    PLAY_BASE,
+    PLAY_BASE_LAN,
+    normalize_play_base,
+    offline_directory,
+    organize_schedule,
+    scheduled_jobs,
+    usable_cookie,
+)
 from .anime_emby import refresh_library, start_prewarm
 from .anime_playurl import (
     DEFAULT_LAN_CIDRS,
@@ -65,7 +73,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.66"
+    plugin_version = "1.0.67"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -137,7 +145,7 @@ class Anime115(_PluginBase):
         self._emby_library = str(config.get("emby_library") or "动漫").strip() or "动漫"
         self._skip_owned = bool(config.get("skip_owned", True))
         self._strm_root = str(config.get("strm_root") or "").strip()
-        self._play_base = str(config.get("play_base") or PLAY_BASE).strip() or PLAY_BASE
+        self._play_base = normalize_play_base(config.get("play_base"))
         self._play_base_lan = str(config.get("play_base_lan") or PLAY_BASE_LAN).strip() or PLAY_BASE_LAN
         self._strm_for = _strm_mode(config.get("strm_for"))
         self._lan_cidrs = str(config.get("lan_cidrs") or DEFAULT_LAN_CIDRS).strip() or DEFAULT_LAN_CIDRS

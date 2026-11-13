@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 PLAY_BASE = (
+    "https://mp.yuanhot.top:8443/api/v1/plugin/P115StrmHelper/redirect_url"
+    "?pickcode={pickcode}&file_name={filename}"
+)
+# 2026-11 备案期临时切换：443 被腾讯云「未备案域名」L7 拦截（明文 HTTP 按 Host、
+# 443 按 SNI 重置），非 443 端口的 TLS 放行，所以外网入口改到 8443。
+# 旧配置里还写着 443 的，读配置时由 normalize_play_base 自动换成 8443。
+LEGACY_WAN_PLAY_BASE = (
     "https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url"
     "?pickcode={pickcode}&file_name={filename}"
 )
@@ -10,6 +17,15 @@ PLAY_BASE_LAN = (
     "http://192.168.1.9:3000/api/v1/plugin/P115StrmHelper/redirect_url"
     "?pickcode={pickcode}&file_name={filename}"
 )
+
+
+def normalize_play_base(value) -> str:
+    """空值和旧的 443 默认模板，都换成 8443 的外网模板；自定义模板原样保留。"""
+    text = str(value or "").strip()
+    if not text or text == LEGACY_WAN_PLAY_BASE:
+        return PLAY_BASE
+    return text
+
 
 
 def usable_cookie(value: str) -> str:

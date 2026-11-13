@@ -88,7 +88,7 @@ class ClassifyTest(unittest.TestCase):
 class StrmTemplateTest(unittest.TestCase):
     def test_empty_mode_keeps_existing_public_template(self):
         url = play_url_for_strm(PLAY_BASE, PICK, "a.mkv")
-        self.assertTrue(url.startswith("https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/redirect_url"))
+        self.assertTrue(url.startswith("https://mp.yuanhot.top:8443/api/v1/plugin/P115StrmHelper/redirect_url"))
         self.assertIn(f"pickcode={PICK}", url)
 
     def test_lan_mode_does_not_use_public_domain(self):
@@ -116,7 +116,7 @@ class StrmTemplateTest(unittest.TestCase):
 
     def test_package_version_is_1_0_42(self):
         package = json.loads((Path(__file__).resolve().parents[1] / "package.v2.json").read_text(encoding="utf-8"))
-        self.assertEqual(package["Anime115"]["version"], "1.0.66")
+        self.assertEqual(package["Anime115"]["version"], "1.0.67")
         self.assertIn("按长度排序", package["Anime115"]["history"]["v1.0.42"])
         self.assertIn("蓝光大包", package["Anime115"]["history"]["v1.0.43"])
         self.assertIn("zh-CN", package["Anime115"]["history"]["v1.0.44"])
@@ -159,7 +159,7 @@ class StrmTemplateTest(unittest.TestCase):
         self.assertIn("fs_mkdir", package["Anime115"]["history"]["v1.0.20"])
         self.assertIn("每 30 分钟", package["Anime115"]["history"]["v1.0.19"])
         text = (_ROOT / "__init__.py").read_text(encoding="utf-8")
-        self.assertIn('plugin_version = "1.0.66"', text)
+        self.assertIn('plugin_version = "1.0.67"', text)
         self.assertIn("内网播放地址", text)
         self.assertIn("外网播放地址", text)
 
@@ -192,7 +192,7 @@ class RedirectDecisionTest(unittest.TestCase):
             request_path="/api/v1/plugin/Anime115/redirect_url",
         )
         self.assertFalse(decision.intranet)
-        self.assertTrue(decision.url.startswith("https://mp.yuanhot.top/api/v1/plugin/P115StrmHelper/"))
+        self.assertTrue(decision.url.startswith("https://mp.yuanhot.top:8443/api/v1/plugin/P115StrmHelper/"))
 
     def test_self_redirect_is_rejected(self):
         with self.assertRaises(PlayUrlError):
@@ -223,7 +223,7 @@ class RedirectDecisionTest(unittest.TestCase):
         text = nginx_snippet()
         self.assertIn("只放在 Emby 的公网反代", text)
         self.assertIn("内网直连 Emby 时不要加", text)
-        self.assertIn('sub_filter "http://192.168.1.9:3000" "https://mp.yuanhot.top"', text)
+        self.assertIn('sub_filter "http://192.168.1.9:3000" "https://mp.yuanhot.top:8443"', text)
 
 
 if __name__ == "__main__":
