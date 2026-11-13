@@ -1260,6 +1260,19 @@ class CookiePanTest(unittest.TestCase):
         pan.list_children("11")
         self.assertFalse(any("natsort/files.php" in call[1] for call in http.calls[before:]))
 
+    def test_all_list_endpoints_blocked_enters_cooldown(self):
+        """三个列目录接口都被挡时进入冷却，别再硬敲 115。"""
+        http = _PageHttp({}, block_aps=True)
+        http.status = 405
+        pan = Pan115("UID=9_1", http=http, gap=0, client_factory=lambda _cookie: _FakeClient())
+        with self.assertRaises(RuntimeError):
+            pan.list_children("11")
+        calls = len(http.calls)
+        with self.assertRaises(RuntimeError) as caught:
+            pan.list_children("11")
+        self.assertIn("冷却", str(caught.exception))
+        self.assertEqual(len(http.calls), calls)
+
     def test_unreadable_parent_is_not_created(self):
         http = _PageHttp({})
         http.status = 400
@@ -1425,7 +1438,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.55")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.56")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):

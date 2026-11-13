@@ -23,6 +23,8 @@ _RETRY_WAITS = (5, 20, 40)
 _RETRY_STATUS = {405, 429, 500, 502, 503, 504}
 # 列目录时 405 不重试：aps 对这个账号回 405 时重试也没用，直接换接口。
 _LIST_RETRY_STATUS = {429, 500, 502, 503, 504}
+# 三个列目录接口都被挡时的冷却秒数：别再硬敲，把风控拖得更久
+_LIST_BLOCKED_COOLDOWN = 600
 
 
 class Pan115:
@@ -33,6 +35,7 @@ class Pan115:
         self.user_id = _uid(cookie)
         self._dirs = {"/": "0"}
         self._list_url = _APS_LIST
+        self._blocked_until = 0.0
         self._gap = gap
         self._last_call = 0.0
         self._lock = threading.Lock()
@@ -119,6 +122,7 @@ class Pan115:
 
         aps.115.com 偶尔会对这个账号回 405（返回的是网页而不是数据），
         这时换开放平台的列目录接口；换过之后这一轮都走新接口。
+        三个接口都被挡的时候直接说被挡，别再硬敲，免得把风控拖得更久。
         """
         params = {
             "cid": directory_id,
@@ -127,6 +131,8 @@ class Pan115:
             "show_dir": 1,
             "aid": 1,
         }
+        if self._blocked_until and time.monotonic() < self._blocked_until:
+            raise RuntimeError(f"115 列目录接口被挡，冷却中（{int(self._blocked_until - time.monotonic())} 秒）")
         if self._list_url != _APS_LIST:
             return self._call("GET", "", url=self._list_url, params=params)
         try:
@@ -144,6 +150,9 @@ class Pan115:
             self._list_url = url
             _log(f"动漫 115 改用 {url} 列目录", level="info")
             return found
+        # 三个都被挡了：这一轮剩下的任务不再去敲 115，等冷却
+        self._blocked_until = time.monotonic() + _LIST_BLOCKED_COOLDOWN
+        _log(f"动漫 115 列目录接口都被挡了，冷却 {_LIST_BLOCKED_COOLDOWN} 秒再试", level="warning")
         raise RuntimeError(f"115 列目录失败：{directory_id}（{last}）")
 
     def move(self, file_id: str, directory_id: str) -> None:
