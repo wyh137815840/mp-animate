@@ -16,7 +16,7 @@ from app.log import logger
 from app.plugins import _PluginBase
 
 from .anime_config import PLAY_BASE, PLAY_BASE_LAN, offline_directory, organize_schedule, scheduled_jobs, usable_cookie
-from .anime_emby import refresh_library
+from .anime_emby import refresh_library, start_prewarm
 from .anime_playurl import (
     DEFAULT_LAN_CIDRS,
     DEFAULT_PUBLIC_HOSTS,
@@ -65,7 +65,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.57"
+    plugin_version = "1.0.58"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -764,6 +764,29 @@ class Anime115(_PluginBase):
         except Exception as exc:
             payload["emby"] = f"刷新 Emby 失败：{exc}"
         logger.info(f"动漫 115 {payload['emby']}")
+        self._prewarm_emby(payload)
+
+    def _prewarm_emby(self, payload: dict) -> None:
+        """给刚写好的 strm 预热媒体信息。
+
+        Emby 第一次播一集时要先 ffprobe 一遍（要走一次 115 的跳转，3~4 秒），
+        这里提前探一遍，用户点播放就不用等。
+        """
+        if payload.get("dry_run") or not self._refresh_emby:
+            return
+        paths = []
+        for item in payload.get("moves") or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("strm") or "")
+            if path and item.get("action") in {"move", "strm"} and not item.get("error"):
+                paths.append(path)
+        if not paths:
+            return
+        try:
+            start_prewarm(self._emby_library, paths, cancel=self._cancel)
+        except Exception as exc:
+            logger.warning(f"动漫 115 预热 Emby 失败：{exc}")
 
     def _config(self) -> JobConfig:
         prefer = [item.strip() for item in self._fansub_prefer.split(",") if item.strip()]
