@@ -242,7 +242,7 @@ def select_one(
                         best[(season, head)] = pick
                     continue
                 # 标题里没有集数标记的整季包：包里每一集的文件名带集数，整理时再拆。
-                if _is_season_pack(torrent.title):
+                if _is_season_pack(torrent.title) or _is_big_pack(torrent, options):
                     season = int(show.season or 1)
                     pick = Pick(show.keyword, season, 0, torrent, score, pack=(0, 0))
                     current = packs.get((season, 0))
@@ -396,6 +396,19 @@ def _is_whole_pack(title: str) -> bool:
     return any(word in lowered for word in _WHOLE_PACK_WORDS)
 
 
+def _is_big_pack(torrent: Torrent, options: SearchOptions) -> bool:
+    """大到不可能是一集、又不像特别篇的，当成整季包。
+
+    花园里很多蓝光合集标题里既没有集数范围也没有「全集」字样，
+    只有体积大得离谱；这种以前会被当成单集丢掉。
+    """
+    if not torrent.size:
+        return False
+    if torrent.size <= options.max_episode_gb * 1024 ** 3:
+        return False
+    return not _NOT_EPISODE_PACK.search(torrent.title or "")
+
+
 def _size_gate(title: str, size: int, options: SearchOptions) -> str:
     """按整包还是单集判断体积。整包看单集体积，另外还有整体上限。
 
@@ -421,7 +434,16 @@ def _size_gate(title: str, size: int, options: SearchOptions) -> str:
     if size < options.min_episode_mb * 1024 * 1024:
         return "体积过小"
     if size > options.max_episode_gb * 1024 ** 3:
-        return "体积过大"
+        if parse_episode(title) is not None:
+            # 明确写着是第几集：按单集上限
+            return "体积过大"
+        # 大到不可能是一集、又不像特别篇的，当成整季包收下：
+        # 整理时按包内文件的集数拆开，拆不开就当单集处理。
+        if _NOT_EPISODE_PACK.search(title or ""):
+            return "体积过大"
+        if options.max_pack_gb and size > options.max_pack_gb * 1024 ** 3:
+            return "整包体积过大"
+        return ""
     return ""
 
 

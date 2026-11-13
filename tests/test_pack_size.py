@@ -50,6 +50,28 @@ class PackCountTest(unittest.TestCase):
         self.assertFalse(_is_whole_pack("某剧 剧场版合集"))
 
 
+class BigPackTest(unittest.TestCase):
+    """标题里没集数、只有体积大得离谱的蓝光合集，当成整季包收下。"""
+
+    def test_huge_pack_without_episode_is_accepted(self):
+        options = SearchOptions(min_episode_mb=150, max_episode_gb=20, max_pack_gb=400)
+        self.assertEqual(_size_gate("[喵萌]某剧 / Some Show [BDRip][1080p][简体]", 112 * GB, options), "")
+
+    def test_huge_special_still_rejected(self):
+        options = SearchOptions(min_episode_mb=150, max_episode_gb=20, max_pack_gb=400)
+        self.assertEqual(
+            _size_gate("[喵萌]某剧 剧场版 合集 [BDRip]", 112 * GB, options),
+            "体积过大",
+        )
+
+    def test_huge_pack_over_total_cap_rejected(self):
+        options = SearchOptions(min_episode_mb=150, max_episode_gb=20, max_pack_gb=400)
+        self.assertEqual(
+            _size_gate("[喵萌]某剧 / Some Show [BDRip][1080p][简体]", 500 * GB, options),
+            "整包体积过大",
+        )
+
+
 class SizeGateTest(unittest.TestCase):
     def test_bluray_pack_accepted(self):
         """30G 的 12 集蓝光合集，每集 2.5G，应该收下。"""
