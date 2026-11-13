@@ -25,6 +25,7 @@ from .anime_playurl import PlayUrlError, play_url_for_strm
 from .anime_strm import commit_strm, pickcode_of, strm_relative
 from .anime_subs import (
     SIDECAR_SUFFIXES,
+    ass_title_matches,
     fetch_bytes,
     is_subtitle_dir,
     is_subtitle_name,
@@ -2375,6 +2376,8 @@ def _apply_subtitles(decision: dict, subs: list, config: JobConfig, relative: st
                 written.append(str(existing))
                 continue
             data = unpack(fetch_bytes(url), node.name)
+            if not ass_title_matches(data, node.name):
+                raise ValueError("ASS 内部片名/集号与文件名矛盾，拒绝挂载")
             path = write_sidecar(root, sub_relative, data)
         except Exception as exc:
             _job_log(f"动漫 115 字幕下载失败 {node.name}：{exc}", "warning")

@@ -115,7 +115,8 @@ def match_subtitles(files, video, episode: int, season: int = 0) -> list:
         seen.add(node.path)
         picked.append(node)
 
-    for item in same_dir:
+    for item in [*same_dir, *elsewhere]:
+        # 同主干优先同样适用于 Subs 等子目录，不能先按集号混入异名短篇。
         # 常见字幕名是 video.SC.ass / video.TC.ass / video.zh-CN.srt。
         # 主干后带语言后缀时也应匹配，但不能把 Show - 01 匹配成 Show - 010。
         sub_stem = stem_of(item.name).casefold()
@@ -211,6 +212,31 @@ def fetch_bytes(url: str, timeout: int = 30) -> bytes:
     if len(data) > MAX_SUB_BYTES:
         raise ValueError(f"字幕太大：{len(data)} 字节")
     return data
+
+
+def ass_title_matches(data: bytes, name: str) -> bool:
+    """ASS 自报完整片名与有明确集号的文件名矛盾时拒绝挂载。
+
+    缺省/无标题的字幕不作推断。只比较双方均使用 [集号] 的发布文件名，
+    不根据字幕时长或内容猜剧名，也不修改字幕。
+    """
+    if suffix_of(name) not in {".ass", ".ssa"}:
+        return True
+    text = data.decode("utf-8-sig", errors="replace")
+    title = next((line.split(":", 1)[1].strip() for line in text.splitlines()
+                  if line.strip().lower().startswith("title:")), "")
+    own_episode = _BRACKET_NUMBER.search(name)
+    declared_episode = _BRACKET_NUMBER.search(title)
+    if not own_episode or not declared_episode:
+        return True
+    def key(value):
+        value = re.sub(r"(?i)(?:\.(?:ass|ssa|sc|tc|chs|cht|zh-cn|zh-tw))+$", "", value)
+        value = re.sub(r"[\[【(][^\]】)]*[\]】)]", " ", value)
+        return " ".join(re.sub(r"[\W_]+", " ", value.casefold()).split())
+    own, declared = key(name), key(title)
+    if not own or not declared:
+        return True
+    return own == declared and int(own_episode.group(1)) == int(declared_episode.group(1))
 
 
 def write_sidecar(root: str, relative: str, data: bytes) -> str:

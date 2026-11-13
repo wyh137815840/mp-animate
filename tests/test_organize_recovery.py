@@ -152,6 +152,22 @@ class RecoveryTest(unittest.TestCase):
                 fetch.assert_not_called()
             self.assertEqual(p.read_text(), 'existing valid subtitle')
 
+    def test_subdir_exact_name_wins_over_short_series_same_number(self):
+        from anime115.anime_subs import match_subtitles
+        video = node('[Group] Main Show [08].mkv')
+        subs = [Node('/pack/Subs/' + name, name, False, 100) for name in
+                ('[Group] Short Show [08].SC.ass', '[Group] Main Show [08].SC.ass', '[Group] Main Show [08].TC.ass')]
+        matched = match_subtitles([video, *subs], video, 8, 1)
+        self.assertEqual([s.name for s in matched], ['[Group] Main Show [08].SC.ass', '[Group] Main Show [08].TC.ass'])
+
+    def test_ass_internal_title_guards_renamed_short_series(self):
+        from anime115.anime_subs import ass_title_matches
+        main = '[Group] Kakkou no Iinazuke [08][BDRip].zh-CN.ass'
+        self.assertFalse(ass_title_matches(b'[Script Info]\nTitle: [Group] Kakkou no Iikagen [08][BDRip].SC', main))
+        self.assertTrue(ass_title_matches(b'[Script Info]\nTitle: [Group] Kakkou no Iinazuke [08][BDRip].SC', main))
+        self.assertFalse(ass_title_matches(b'[Script Info]\nTitle: [Group] Kakkou no Iinazuke [09][BDRip].SC', main))
+        self.assertTrue(ass_title_matches(b'[Script Info]\nTitle: Default Aegisub file', main))
+
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')
