@@ -321,6 +321,11 @@ class RecoveryTest(unittest.TestCase):
         # 整包都是 OVA 时保持原样（有些番的 OVA 就是那一季的正片）
         self.assertEqual(len(_main_videos([ova])), 1)
 
+    def test_nested_probe_has_time_cap(self):
+        from anime115 import anime_jobs
+        self.assertGreater(anime_jobs._NESTED_PROBE_SECONDS, 0)
+        self.assertGreaterEqual(anime_jobs._NESTED_PROBE_LIMIT, 1)
+
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
         cases = [

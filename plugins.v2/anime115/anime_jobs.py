@@ -50,6 +50,9 @@ _STORAGE_CALL_TIMEOUT = STORAGE_TIMEOUT
 _TASK_BUDGET = 360
 # 找 file_id 时最多探几个目录。收件箱里目录多的时候不能一个个试下去。
 _NESTED_PROBE_LIMIT = 20
+# 探目录的总时限。115 慢的时候一次列目录要 8-10 秒，探满 20 个会吃掉整条任务的预算；
+# 115 快时次数上限仍然生效。
+_NESTED_PROBE_SECONDS = 60
 
 
 class JobStopped(Stopped):
@@ -1884,9 +1887,13 @@ def _choose_by_nested_id(session, children: list[Node], file_id: str, deadline: 
             rest.append(directory)
     owners = []
     probes = 0
+    started = time.monotonic()
     for directory in [*likely, *rest]:
         if probes >= _NESTED_PROBE_LIMIT:
             _job_log(f"动漫 115 找这一包只探了 {_NESTED_PROBE_LIMIT} 个目录，先记找不到", "warning")
+            break
+        if time.monotonic() - started > _NESTED_PROBE_SECONDS:
+            _job_log(f"动漫 115 找这一包探了 {_NESTED_PROBE_SECONDS} 秒还没找到，先记找不到", "warning")
             break
         probes += 1
         nested = _list_dir(session, directory.path, deadline)
