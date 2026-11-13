@@ -1408,8 +1408,9 @@ def _is_subtitle(name: str) -> bool:
 def _episode_of_name(name: str, default_season: int = 0) -> tuple[int, int] | None:
     """目录名常以 .mkv 结尾。去掉这一层再认集数。
 
-    文件名里没写季号时，按订阅给的季算（default_season），
+    季号以文件自己写的为准（S2、S02E04 之类）；文件没写季号时按订阅给的季算，
     否则「第32话」这种文件会被当成第一季，和任务对不上。
+    文件写的季和订阅的季不一致时，按文件自己的季报出去，由上层判定不合而不是改名。
     """
     text = name or ""
     if _suffix(text) in VIDEO_EXTS or _suffix(text) in SUB_EXTS:
@@ -1417,7 +1418,10 @@ def _episode_of_name(name: str, default_season: int = 0) -> tuple[int, int] | No
     parsed = parse_episode(text)
     if parsed is None:
         return None
-    if default_season > 0 and _explicit_season(text) is None:
+    explicit = _content_season(text)
+    if explicit is not None:
+        return (explicit, parsed[1])
+    if default_season > 0:
         return (default_season, parsed[1])
     return parsed
 
@@ -1941,17 +1945,33 @@ def _subtitle_in_dirs(session, children: list[Node], deadline: float = None) -> 
     return found
 
 
+# 特别篇标记：OVA、OAD、番外。出现在集数前面，说明这是同一季里的附赠内容。
+_SPECIAL_MARKER = re.compile(
+    r"(?i)(?:\[(?:OVA\d*|OAD|番外|特別編|特别篇)\]|(?<![A-Za-z])(?:OVA\d*|OAD|番外)(?=\s*[-–\[【\s]))",
+)
+
+
 def _main_videos(videos: list[Node]) -> list[Node]:
     """一个包里认得出集数的才算正片。
 
     BD 目录里常混着 NCOP、NCED、MENU、OAD、PV 这类没有集数的花絮，
     它们认不出集数；只要包里还有认得出集数的正片，就把花絮排除掉。
     全都认不出时保持原样，交给上层按「集数对不上」处理，不乱搬。
+
+    带 OVA、OAD、番外标记的文件也算特别篇：包里同时有正片时只留正片，
+    不让 OVA 变成同一集的另一版本；但整包都是 OVA 时（有些番的 OVA 就是那一季的正片）
+    保持原样。
     """
     if len(videos) <= 1:
         return videos
     numbered = [item for item in videos if _pack_episode_full(item.name) > 0]
-    return numbered or videos
+    if not numbered:
+        return videos
+    specials = [item for item in numbered if _SPECIAL_MARKER.search(item.name)]
+    plain = [item for item in numbered if not _SPECIAL_MARKER.search(item.name)]
+    if specials and plain:
+        return plain
+    return numbered
 
 
 def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
@@ -2267,6 +2287,12 @@ def _pack_label_in(target: str, label: str) -> bool:
     chunks = _PACK_CJK_RE.findall(label)
     head = "".join(chunks)[:2]
     return len(head) >= 2 and head in target
+
+
+def _content_season(name: str) -> int | None:
+    """文件名里写明的季号。开头字幕组里的 S2、S3 之类不算季号。"""
+    text = re.sub(r"^[\[【][^\]】]{1,40}[\]】]\s*", "", name or "")
+    return _explicit_season(text)
 
 
 def _path_season(node: Node) -> int | None:

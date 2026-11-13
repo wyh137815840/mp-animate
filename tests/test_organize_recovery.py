@@ -305,6 +305,22 @@ class RecoveryTest(unittest.TestCase):
         self.assertGreaterEqual(big, 120)
         self.assertLessEqual(_move_budget(config, 500), 900)
 
+    def test_file_states_season_wins_over_task_season(self):
+        from anime115.anime_jobs import _episode_of_name
+        self.assertEqual(_episode_of_name('[Comicat][Grand Blue S2][04][1080P][GB][MP4].mp4', 2), (2, 4))
+        self.assertEqual(_episode_of_name('[Comicat][Grand Blue S2][04][1080P][GB][MP4].mp4', 1), (2, 4))
+        # 字幕组名字里的 S2 不是季号
+        self.assertEqual(_episode_of_name('[S2字幕组] Show - 01 [1080p].mkv', 1), (1, 1))
+
+    def test_ova_is_not_a_version_of_main_episode(self):
+        from anime115.anime_jobs import _main_videos
+        ova = node('[DBD-Raws][Jaku Chara Tomozaki-kun S1][OVA][01][1080P].mkv')
+        main = node('[DBD-Raws][Jaku Chara Tomozaki-kun S1][01][1080P].mkv')
+        kept = _main_videos([ova, main])
+        self.assertEqual([item.name for item in kept], [main.name])
+        # 整包都是 OVA 时保持原样（有些番的 OVA 就是那一季的正片）
+        self.assertEqual(len(_main_videos([ova])), 1)
+
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
         cases = [
