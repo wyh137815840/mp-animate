@@ -106,6 +106,7 @@ def _row(item) -> dict:
         "state": getattr(item, "state", "") or "",
         "note": getattr(item, "note", None),
         "genre_ids": getattr(item, "genre_ids", None),
+        "total_episode": getattr(item, "total_episode", None),
     }
 
 

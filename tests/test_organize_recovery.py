@@ -245,6 +245,37 @@ class RecoveryTest(unittest.TestCase):
             hit = any(_pack_label_in(pack, label) for label in labels)
             self.assertEqual(hit, expected, f'{name} -> {labels}')
 
+    def test_episode_beyond_season_cap_is_refused(self):
+        caps = {('女神的露天咖啡厅', 2): 12}
+        files = [node('[DAY][女神のカフェテラス][第20話][BDrip][1080P].mkv'),
+                 node('[DAY][女神のカフェテラス][第21話][BDrip][1080P].mkv')]
+        d = _decide_move({'show': '女神的露天咖啡厅', 'season': 2, 'episode': 0}, files, '/anime',
+                          '女神的露天咖啡厅[BD]', caps)
+        self.assertEqual(d['action'], 'leave')
+        self.assertIn('上限', d['reason'])
+        inside = _decide_move({'show': '女神的露天咖啡厅', 'season': 2, 'episode': 0},
+                               [node('[DAY][女神のカフェテラス][第11話][BDrip].mkv'),
+                                node('[DAY][女神のカフェテラス][第12話][BDrip].mkv')],
+                               '/anime', '女神的露天咖啡厅[BD]', caps)
+        self.assertEqual(inside['action'], 'move')
+        self.assertEqual([i['episode'] for i in inside['items']], [11, 12])
+
+    def test_season_subfolders_split_pack_into_seasons(self):
+        from anime115.anime_jobs import _pack_items
+        files = [Node('/pack/BD/S1/[DAY][女神のカフェテラス][第1話][BDrip].mkv', '[DAY][女神のカフェテラス][第1話][BDrip].mkv', False, 100),
+                 Node('/pack/BD/S1/[DAY][女神のカフェテラス][第2話][BDrip].mkv', '[DAY][女神のカフェテラス][第2話][BDrip].mkv', False, 100),
+                 Node('/pack/BD/S2/[DAY][女神のカフェテラス][第13話][BDrip].mkv', '[DAY][女神のカフェテラス][第13話][BDrip].mkv', False, 100),
+                 Node('/pack/BD/S2/[DAY][女神のカフェテラス][第14話][BDrip].mkv', '[DAY][女神のカフェテラス][第14話][BDrip].mkv', False, 100)]
+        self.assertEqual(_pack_items(files, {'season': 2}, '女神のカフェテラス[BD]', files), [])
+
+    def test_single_season_subfolder_pack_is_split(self):
+        from anime115.anime_jobs import _pack_items
+        files = [Node('/pack/BD/S2/[DAY][女神のカフェテラス][第13話][BDrip].mkv', '[DAY][女神のカフェテラス][第13話][BDrip].mkv', False, 100),
+                 Node('/pack/BD/S2/[DAY][女神のカフェテラス][第14話][BDrip].mkv', '[DAY][女神のカフェテラス][第14話][BDrip].mkv', False, 100)]
+        items = _pack_items(files, {'season': 2}, '女神のカフェテラス[BD]', files)
+        self.assertEqual([i['season'] for i in items], [2, 2])
+        self.assertEqual([i['episode'] for i in items], [13, 14])
+
     def test_tc_language_is_preserved_locally(self):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')

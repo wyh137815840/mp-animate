@@ -267,6 +267,23 @@ class JobConfig:
     public_hosts: str = ""
     skip_owned: bool = True
     subtitle_enabled: bool = True
+    # 每季的集数上限：{(剧名, 季): 集数}。用来挡住跨季绝对集数写错集。
+    season_caps: dict = field(default_factory=dict)
+
+
+def _season_cap(caps: dict, show: str, season: int) -> int | None:
+    """这一季最多多少集。认不出来就返回空，表示不做限制。"""
+    if not caps or not show or season <= 0:
+        return None
+    key = (show, season)
+    if key in caps:
+        return int(caps[key])
+    for (name, number), total in caps.items():
+        if int(number) != season:
+            continue
+        if name.startswith(show) or show.startswith(name):
+            return int(total)
+    return None
 
 
 def _fair_order(picks: list) -> list:
@@ -575,7 +592,7 @@ def _organize_one(task, session, library, config, moves, offline=None, round_dea
         task["organize_checked_at"] = time.time()
         moves.append({"action": "leave", "reason": why, "task": task.get("infohash"), "nodes": [], "pack": pack})
         return
-    decision = _decide_move(task, files, library, pack)
+    decision = _decide_move(task, files, library, pack, config.season_caps)
     decision["pack"] = pack
     if decision.get("action") != "move":
         # 记下这一条为什么没搬成，汇报时能区分「包没落地」和「真的卡住」。
@@ -2176,6 +2193,22 @@ def _pack_label_in(target: str, label: str) -> bool:
     return len(head) >= 2 and head in target
 
 
+def _path_season(node: Node) -> int | None:
+    """文件所在目录里写明的季号。蓝光合集常按 S1、S2 分目录。
+
+    只看目录，不看文件名：文件名里的 S2E01 说的是集，不是这一集属于哪一季。
+    """
+    parts = [part for part in (node.path or "").split("/")[:-1] if part]
+    found = set()
+    for part in parts:
+        season = _explicit_season(part)
+        if season and season > 0:
+            found.add(season)
+    if len(found) == 1:
+        return next(iter(found))
+    return None
+
+
 def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node]) -> list[dict]:
     """整包：按每个视频自己文件名里的集数，拆成一集一项。
 
@@ -2188,7 +2221,8 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
     parsed_items = []
     for video in videos:
         parsed = parse_episode(video.name)
-        explicit = _explicit_season(video.name)
+        # 季号先看文件名（S05E01 这类最明确），再看所在目录（蓝光合集按 S1、S2 分目录）。
+        explicit = _explicit_season(video.name) or _path_season(video)
         episode = _pack_episode_full(video.name)
         if episode <= 0:
             # 认不出集数的文件（NCOP 之类）不参与拆分，留在包里
@@ -2291,7 +2325,8 @@ def _move_name(item: dict, node: Node) -> str:
     return name
 
 
-def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "") -> dict:
+def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "",
+                 season_caps: dict = None) -> dict:
     # 整包优先：包里多集时按每集自己的集数拆开入库。
     all_videos = [item for item in _real_videos(files) if not _is_extra_video(item.name)]
     all_videos = _main_videos(all_videos)
@@ -2300,6 +2335,15 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
         if items:
             show = safe_dir_name(task.get("show") or "unknown")
             season = items[0]["season"]
+            cap = _season_cap(season_caps or {}, str(task.get("show") or ""), season)
+            if cap and any(int(item.get("episode") or 0) > cap for item in items):
+                # 集数超出本季上限：多半是跨季的绝对集数（蓝光合集常见），不猜不搬。
+                return {
+                    "action": "leave",
+                    "reason": f"集数超出本季上限 {cap} 集",
+                    "task": task.get("infohash"),
+                    "nodes": [],
+                }
             dest_dir = join_path(join_path(library, show), f"Season {season:02d}")
             for item in items:
                 nodes = []
@@ -2348,6 +2392,14 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
     season, episode = parsed
     if season <= 0 or episode <= 0:
         return {"action": "leave", "reason": "uncertain", "task": task.get("infohash"), "nodes": []}
+    cap = _season_cap(season_caps or {}, str(task.get("show") or ""), season)
+    if cap and episode > cap:
+        return {
+            "action": "leave",
+            "reason": f"集数超出本季上限 {cap} 集",
+            "task": task.get("infohash"),
+            "nodes": [],
+        }
     show = safe_dir_name(task.get("show") or "unknown")
     dest_dir = join_path(join_path(library, show), f"Season {season:02d}")
     stem = video.name.rsplit(".", 1)[0]

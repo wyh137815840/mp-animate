@@ -73,7 +73,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.70"
+    plugin_version = "1.0.71"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -806,6 +806,24 @@ class Anime115(_PluginBase):
         except Exception as exc:
             logger.warning(f"动漫 115 预热 Emby 失败：{exc}")
 
+    def _season_caps(self) -> dict:
+        """从 MoviePilot 订阅里取每季的集数上限。
+
+        蓝光合集常常跨季并用绝对集数（第20話），靠这个上限挡住写错集。
+        """
+        try:
+            rows = load_mp_subscriptions()
+        except Exception:
+            return {}
+        caps = {}
+        for row in rows or []:
+            name = str(row.get("name") or "").strip()
+            season = _as_int(row.get("season"), 0)
+            total = _as_int(row.get("total_episode"), 0)
+            if name and season > 0 and total > 0:
+                caps[(name, season)] = total
+        return caps
+
     def _config(self) -> JobConfig:
         prefer = [item.strip() for item in self._fansub_prefer.split(",") if item.strip()]
         roots = []
@@ -843,6 +861,7 @@ class Anime115(_PluginBase):
             public_hosts=self._public_hosts,
             skip_owned=self._skip_owned,
             subtitle_enabled=self._subtitle,
+            season_caps=self._season_caps(),
         )
 
     def _report(self, patch: dict) -> None:
