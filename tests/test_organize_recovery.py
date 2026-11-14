@@ -407,6 +407,37 @@ class RecoveryTest(unittest.TestCase):
         index._episodes[("【我推的孩子】 (2023)", 1)] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
         self.assertTrue(index.has(Pick()))
 
+    def test_library_index_counts_episodes_inside_pack_subfolders(self):
+        from anime115.anime_jobs import _OwnedIndex
+
+        class Item:
+            def __init__(self, name, is_dir=False):
+                self.name = name
+                self.is_dir = is_dir
+                self.path = "/动漫/测试剧 (2024)/Season 01/" + name
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def list_dir(self, path, **kwargs):
+                self.calls += 1
+                if path.endswith("Season 01"):
+                    return [Item("[压制组] 测试剧 [01-12] 合集", True),
+                            Item("S01E03 - 测试剧 - 03.mkv")]
+                if "合集" in path:
+                    return [Item("S01E07 - 测试剧 - 07.mkv")]
+                return []
+
+        index = _OwnedIndex.__new__(_OwnedIndex)
+        index.session = Session()
+        index.config = type("C", (), {"season_caps": {}})()
+        index.library = "/动漫"
+        index._folders = ["测试剧 (2024)"]
+        index._episodes = {}
+        episodes = index._load_episodes("测试剧 (2024)", 1)
+        self.assertEqual(episodes, {3, 7})
+
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
         cases = [

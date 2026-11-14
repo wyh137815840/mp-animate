@@ -1421,6 +1421,17 @@ class _OwnedIndex:
                 raise
             except Exception:
                 continue
+            # 季目录里常留着发布包的子目录，集数文件还在里面，要一并算进来，
+            # 否则「库里已有这一集」会误判成没有，把已有的集再下一遍。
+            for item in files:
+                if not getattr(item, "is_dir", False):
+                    continue
+                try:
+                    files.extend(_list_dir(self.session, item.path))
+                except JobStopped:
+                    raise
+                except Exception:
+                    continue
             for item in files:
                 parsed = parse_episode(item.name)
                 if parsed is not None and parsed[0] == season:
