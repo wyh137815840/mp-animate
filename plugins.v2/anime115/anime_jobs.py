@@ -1981,7 +1981,7 @@ def _main_videos(videos: list[Node]) -> list[Node]:
     return numbered
 
 
-def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
+def _videos_for_task(files: list[Node], task: dict, season_caps: dict = None) -> list[Node]:
     """这一包里只有一个正片就用它。多个正片时只留集数对得上的，不对跨包合并。"""
     # 只排除有明确花絮标记的文件；全部是花絮时也不能回退为正片。
     original = _real_videos(files)
@@ -1989,16 +1989,24 @@ def _videos_for_task(files: list[Node], task: dict) -> list[Node]:
     videos = _main_videos(videos)
     season = int(task.get("season") or 0)
     episode = int(task.get("episode") or 0)
+    show = str(task.get("show") or "")
+
+    def _match(item) -> bool:
+        parsed = _episode_of_name(item.name, season)
+        if parsed is None:
+            return False
+        resolved = _resolve_episode(show, _content_season(item.name) or 0, season,
+                                    parsed[1], season_caps or {})
+        return _same_episode(resolved, season, episode)
+
     if len(videos) <= 1:
         # 剔除花絮后剩下的正片不能冒充任务所需的另一集。
         if videos and len(original) > 1 and episode > 0:
-            parsed = _episode_of_name(videos[0].name, season)
-            if parsed is None or not _same_episode(parsed, season, episode):
+            if not _match(videos[0]):
                 return []
         return videos
     if episode > 0:
-        named = [item for item in videos
-                 if _same_episode(_episode_of_name(item.name, season), season, episode)]
+        named = [item for item in videos if _match(item)]
         if len(named) == 1:
             return named
         titled = [item for item in named if _title_hits(item, task)]
@@ -2100,6 +2108,11 @@ def _is_extra_video(name: str) -> bool:
     if _EXTRA_TAG_ONLY.search(content) or _EXTRA_BRACKET.search(content):
         return True
     if _EXTRA_PAREN.search(content):
+        return True
+    # [PV] 出现在集数前面时是「这是 PV」的标记（蓝光合集里常见），要排除；
+    # 出现在片名后面、后面没有集数时，是这一集自带的内容，靠下面的片名判断。
+    pv = re.search(r"[\[【]\s*PV\s*[\]】]", content, re.IGNORECASE)
+    if pv and re.search(r"[\[【]\s*[0-9]{1,3}\s*[\]】]", content[pv.end():]):
         return True
     if _has_title_bracket(content):
         # 名字里带着这一集自己的标题（[The Sealed Sword Frenzy]），
@@ -2318,27 +2331,44 @@ def _path_season(node: Node) -> int | None:
     return None
 
 
-def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node]) -> list[dict]:
+def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node],
+                season_caps: dict = None) -> list[dict]:
     """整包：按每个视频自己文件名里的集数，拆成一集一项。
 
     认不准就返回空列表，让上层按单集处理（宁可少收，不要收错）。
     要求：每个视频都有集数、互不重复、连号、季与包一致。
     """
     season = int(task.get("season") or 0)
+    show = str(task.get("show") or "")
+    # 包名写明的季：文件自己没写季时用它当底
+    pack_seasons = _pack_seasons(pack_name or "")
+    if len(pack_seasons) != 1:
+        pack_seasons = set()
+    fallback_season = next(iter(pack_seasons)) if pack_seasons else season
     # 每个文件自己写明的季号。parse_episode 认不出季时会默认第 1 季，不能拿它当依据。
     explicit_seasons = set()
+    resolved_seasons = set()
     parsed_items = []
     for video in videos:
         parsed = parse_episode(video.name)
         # 季号先看文件名（S05E01 这类最明确），再看所在目录（蓝光合集按 S1、S2 分目录）。
-        explicit = _explicit_season(video.name) or _path_season(video)
+        stated = _explicit_season(video.name)
+        path_season = _path_season(video)
+        explicit = stated if stated is not None else path_season
         episode = _pack_episode_full(video.name)
         if episode <= 0:
             # 认不出集数的文件（NCOP 之类）不参与拆分，留在包里
             continue
         if explicit is not None:
             explicit_seasons.add(explicit)
-        parsed_items.append((video, episode, explicit))
+        if stated in (0, 1) and path_season is None:
+            # 整部剧连着数时（第二季写成 S01E13），按各季集数换算它属于哪一季第几集
+            resolved_season, episode = _resolve_episode(show, stated or 0, fallback_season,
+                                                        episode, season_caps or {})
+        else:
+            resolved_season = explicit if explicit is not None else fallback_season
+        resolved_seasons.add(resolved_season)
+        parsed_items.append((video, episode, explicit, resolved_season))
     # 同一包可能混入另一部作品（标题不同但编号相同），不能当正片多版本。
     # 只保留剧名与包名或任务标题对得上的那些文件；对不上的整包留下不动。
     targets = [pack_name or "", str(task.get("title") or "")]
@@ -2350,29 +2380,27 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
         return []
     keep_index = {index for index, labels in enumerate(labels_by_item) if labels}
     parsed_items = [item for index, item in enumerate(parsed_items) if index in keep_index]
-    explicit_seasons = {s for _, _, s in parsed_items if s is not None}
+    explicit_seasons = {s for _, _, s, _ in parsed_items if s is not None}
     if len(explicit_seasons) > 1:
         # 文件里写着不同的季，不敢拆
         return []
-    if len(explicit_seasons) == 1:
-        # 文件自己说是第几季就按它来：订阅的季和包的实际季可能不是一回事
-        season = next(iter(explicit_seasons))
-    else:
-        if _PACK_MULTI_SEASON.search(pack_name or ""):
-            # 包名写明混了多季（S1+S2），文件自己又没写属于哪一季，不敢整包按一季拆。
-            return []
-        pack_seasons = _pack_seasons(pack_name or "")
-        if len(pack_seasons) == 1:
-            season = next(iter(pack_seasons))
+    resolved_seasons = {s for _, _, _, s in parsed_items}
+    if len(resolved_seasons) > 1:
+        # 换算后这些文件分属不同季，不敢整包按一季拆
+        return []
+    if not explicit_seasons and _PACK_MULTI_SEASON.search(pack_name or ""):
+        # 包名写明混了多季（S1+S2），文件自己又没写属于哪一季，不敢整包按一季拆。
+        return []
+    season = next(iter(resolved_seasons)) if resolved_seasons else season
     if season <= 0:
         return []
     items = []
     used = set()
-    for video, episode, explicit in parsed_items:
+    for video, episode, explicit, resolved in parsed_items:
         if episode <= 0:
             return []
-        if explicit is not None and explicit != season:
-            # 文件写的是别的季，不敢拆
+        if resolved != season:
+            # 文件换算后属于别的季，不敢拆
             return []
         if episode in used:
             # 同一集有多个版本（NC、CM&PV 之类）：算多版本，一起搬
@@ -2434,13 +2462,92 @@ def _move_name(item: dict, node: Node) -> str:
     return name
 
 
+def _show_caps(caps: dict, show: str) -> dict[int, int]:
+    """这部剧每一季各多少集。从订阅上限里取，认不出来的季不出现。"""
+    if not caps or not show:
+        return {}
+    exact: dict[int, int] = {}
+    for (name, number), total in caps.items():
+        try:
+            season = int(number)
+            size = int(total)
+        except (TypeError, ValueError):
+            continue
+        if season <= 0 or size <= 0:
+            continue
+        if name == show:
+            exact[season] = size
+    if exact:
+        return exact
+    merged: dict[int, int] = {}
+    for (name, number), total in caps.items():
+        try:
+            season = int(number)
+            size = int(total)
+        except (TypeError, ValueError):
+            continue
+        if season <= 0 or size <= 0:
+            continue
+        if name.startswith(show) or show.startswith(name):
+            merged[season] = size
+    return merged
+
+
+def _absolute_season(show: str, episode: int, caps: dict) -> tuple[int, int] | None:
+    """按各季集数累加，把「整部剧连着数」的集号换算成第几季第几集。
+
+    有些大包接着上一季的集数往下写：两季的剧，第二季按规矩该写 S02E01，
+    他们写成 S01E13。这里按每季的集数累加，找出这个集号真正属于哪一季。
+    换算不出来返回空，不猜。
+    """
+    mapping = _show_caps(caps, show)
+    if not mapping or episode <= 0:
+        return None
+    total = 0
+    for season in sorted(mapping):
+        size = mapping[season]
+        if total < episode <= total + size:
+            return (season, episode - total)
+        total += size
+    return None
+
+
+def _resolve_episode(show: str, stated_season: int, fallback_season: int,
+                     episode: int, caps: dict) -> tuple[int, int]:
+    """确定文件属于第几季第几集。
+
+    文件自己写的季集数在订阅上限之内就按它来；超出上限、而文件写的是第 1 季或
+    没写季时，按「整部剧连着数」的写法换算（发布组接着上一季的集数往下写，
+    两季的剧第二季写成 S01E13）。换算不出来保留原样，让上层按「集数对不上」处理。
+    """
+    if episode <= 0:
+        return (stated_season or fallback_season, episode)
+    mapping = _show_caps(caps, show)
+    if stated_season:
+        size = mapping.get(stated_season)
+        if size and episode <= size:
+            return (stated_season, episode)
+        if stated_season == 1:
+            resolved = _absolute_season(show, episode, caps)
+            if resolved:
+                return resolved
+        return (stated_season, episode)
+    size = mapping.get(fallback_season)
+    if size and episode <= size:
+        return (fallback_season, episode)
+    resolved = _absolute_season(show, episode, caps)
+    if resolved:
+        return resolved
+    return (fallback_season, episode)
+
+
 def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "",
                  season_caps: dict = None) -> dict:
     # 整包优先：包里多集时按每集自己的集数拆开入库。
     all_videos = [item for item in _real_videos(files) if not _is_extra_video(item.name)]
     all_videos = _main_videos(all_videos)
     if len(all_videos) > 1:
-        items = _pack_items(all_videos, task, pack_name, files)
+        items = _pack_items(all_videos, task, pack_name, files, season_caps)
         if items:
             show = safe_dir_name(task.get("show") or "unknown")
             season = items[0]["season"]
@@ -2486,7 +2593,7 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
                 "items": items,
                 "pack_episodes": len(items),
             }
-    videos = _videos_for_task(files, task)
+    videos = _videos_for_task(files, task, season_caps)
     if not videos:
         present = [item for item in files if _is_video_file(item)]
         reason = "没有视频" if not present else "集数对不上"
@@ -2497,12 +2604,18 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
     video = videos[0]
     task_season = int(task.get("season") or 0)
     parsed = _episode_of_name(video.name, task_season)
+    from_file = parsed is not None
     if parsed is None:
         # 文件名里没有集数：只能靠任务标题认，标题也没有就说明这一集认不准。
         parsed = _episode_of_name(str(task.get("title") or ""), task_season)
     if parsed is None:
         return {"action": "leave", "reason": "uncertain", "task": task.get("infohash"), "nodes": []}
     season, episode = parsed
+    if from_file:
+        # 整部剧连着数时（第二季写成 S01E13），按各季集数换算它属于哪一季第几集
+        season, episode = _resolve_episode(str(task.get("show") or ""),
+                                            _content_season(video.name) or 0, task_season,
+                                            episode, season_caps or {})
     if season <= 0 or episode <= 0:
         return {"action": "leave", "reason": "uncertain", "task": task.get("infohash"), "nodes": []}
     cap = _season_cap(season_caps or {}, str(task.get("show") or ""), season)

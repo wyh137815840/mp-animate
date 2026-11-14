@@ -326,6 +326,26 @@ class RecoveryTest(unittest.TestCase):
         self.assertGreater(anime_jobs._NESTED_PROBE_SECONDS, 0)
         self.assertGreaterEqual(anime_jobs._NESTED_PROBE_LIMIT, 1)
 
+    def test_absolute_numbering_across_seasons(self):
+        from anime115.anime_jobs import _resolve_episode
+        caps = {("某剧", 1): 12, ("某剧", 2): 12}
+        # 第二季按规矩该写 S02E01，发布组写成 s01e13
+        self.assertEqual(_resolve_episode("某剧", 1, 2, 13, caps), (2, 1))
+        # 本季范围内的集号按原样
+        self.assertEqual(_resolve_episode("某剧", 1, 2, 12, caps), (1, 12))
+        # 三季连着数：11 + 13 集的前两季，绝对号 25 是第三季第一集
+        show_caps = {("我推的孩子", 1): 11, ("我推的孩子", 2): 13, ("我推的孩子", 3): 11}
+        self.assertEqual(_resolve_episode("我推的孩子", 0, 3, 25, show_caps), (3, 1))
+        self.assertEqual(_resolve_episode("我推的孩子", 1, 3, 25, show_caps), (3, 1))
+        self.assertEqual(_resolve_episode("我推的孩子", 0, 3, 5, show_caps), (3, 5))
+
+    def test_pv_marker_before_number_is_extra(self):
+        from anime115.anime_jobs import _is_extra_video
+        self.assertTrue(_is_extra_video(
+            "S02E14 - [DBD-Raws][Oshi no Ko S2][PV][14][1080P][BDRip][HEVC-10bit][FLAC].mkv"))
+        # 片名后面自带的内容不算花絮
+        self.assertFalse(_is_extra_video("[Group][The Sealed Sword Frenzy][PV].mkv"))
+
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
         cases = [
