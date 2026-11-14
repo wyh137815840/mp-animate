@@ -1323,6 +1323,12 @@ class _OwnedIndex:
             return False
         season = int(getattr(pick, "season", 0) or 0)
         episode = int(getattr(pick, "episode", 0) or 0)
+        # 查库里已有之前先按订阅上限换算成真正的季集号：发布用绝对编号时
+        # （第二季接着第一季往下写），不换算会重复提交库里已有的集。
+        caps = getattr(self.config, "season_caps", None) or {}
+        if season > 0 and episode > 0 and caps:
+            season, episode = _resolve_episode(
+                getattr(pick, "show", "") or "", season, season, episode, caps)
         span = getattr(pick, "pack", None) or None
         if span and int(span[1]) > int(span[0]):
             # 整包：包里还缺集就还值得下，只看第一集会把整包误判成已有

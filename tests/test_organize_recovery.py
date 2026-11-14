@@ -381,6 +381,32 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(_absolute_season("【我推的孩子】", 12, caps), (2, 1))
         self.assertEqual(_absolute_season("【我推的孩子】", 5, caps), (1, 5))
 
+    def test_owned_index_resolves_absolute_numbering_before_checking_library(self):
+        from anime115.anime_jobs import _OwnedIndex
+
+        class Pick:
+            show = "【我推的孩子】"
+            season = 1
+            episode = 29
+            pack = None
+
+        class Config:
+            library_root = "/media/动漫"
+            mount_prefix = ""
+            season_caps = {("【我推的孩子】", 1): 11, ("【我推的孩子】", 2): 13,
+                           ("【我推的孩子】", 3): 11}
+
+        index = _OwnedIndex.__new__(_OwnedIndex)
+        index.session = None
+        index.config = Config()
+        index.library = "/media/动漫"
+        index._folders = ["【我推的孩子】 (2023)"]
+        index._episodes = {}
+        # 第三季第 5 集（绝对号 29）库里已有，换算后应判定为已有
+        index._episodes[("【我推的孩子】 (2023)", 3)] = {1, 2, 3, 4, 5}
+        index._episodes[("【我推的孩子】 (2023)", 1)] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+        self.assertTrue(index.has(Pick()))
+
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
         cases = [
