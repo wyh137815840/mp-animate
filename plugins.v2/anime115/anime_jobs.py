@@ -2403,9 +2403,12 @@ def _pack_items(videos: list[Node], task: dict, pack_name: str, files: list[Node
             continue
         if explicit is not None:
             explicit_seasons.add(explicit)
-        if stated in (0, 1) and path_season is None:
-            # 整部剧连着数时（第二季写成 S01E13），按各季集数换算它属于哪一季第几集
-            resolved_season, episode = _resolve_episode(show, stated or 0, fallback_season,
+        if stated is None or stated in (0, 1):
+            # 整部剧连着数时（第二季写成 S01E13），按各季集数换算它属于哪一季第几集。
+            # 所在目录的季只是兜底：集数超出该季上限时照样要按连号换算，
+            # 否则发布用绝对编号的文件会被标成「第 3 季第 25 集」这种错号。
+            resolved_season, episode = _resolve_episode(show, stated or 0,
+                                                        path_season or fallback_season,
                                                         episode, season_caps or {})
         else:
             resolved_season = explicit if explicit is not None else fallback_season

@@ -440,6 +440,24 @@ class RecoveryTest(unittest.TestCase):
         episodes = index._load_episodes("测试剧 (2024)", 1)
         self.assertEqual(episodes, {3, 7})
 
+    def test_absolute_numbering_converts_even_inside_a_season_folder(self):
+        from anime115.anime_jobs import _pack_items
+        from anime115.anime_flatten import Node
+
+        caps = {("【我推的孩子】", 1): 11, ("【我推的孩子】", 2): 13,
+                ("【我推的孩子】", 3): 11}
+        release = ("[Skymoon-Raws] 【我推的孩子】 / Oshi no Ko - 25 "
+                   "[ViuTV][WEB-DL][1080p][AVC AAC][CHT][SRT][MKV]")
+        second = release.replace("- 25 ", "- 26 ")
+        videos = [Node(path=f"/动漫/【我推的孩子】 (2023)/Season 03/{release}.mkv",
+                       name=f"{release}.mkv", is_dir=False, size=100),
+                  Node(path=f"/动漫/【我推的孩子】 (2023)/Season 03/{second}.mkv",
+                       name=f"{second}.mkv", is_dir=False, size=100)]
+        task = {"show": "【我推的孩子】", "season": 1, "episode": 25, "title": release}
+        items = _pack_items(videos, task, release, videos, caps)
+        self.assertEqual(len(items), 2)
+        self.assertEqual([(i.get("season"), i.get("episode")) for i in items], [(3, 1), (3, 2)])
+
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
         cases = [
