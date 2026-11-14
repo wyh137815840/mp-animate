@@ -367,6 +367,20 @@ class RecoveryTest(unittest.TestCase):
         from anime115.anime_call import DAILY_ROUND_BUDGET, ROUND_BUDGET
         self.assertGreater(DAILY_ROUND_BUDGET, ROUND_BUDGET)
 
+    def test_season_cap_override_parses_and_overrides(self):
+        from anime115.anime_subscribe import parse_cap_overrides
+        caps = parse_cap_overrides("【我推的孩子】=1:11,2:13,3:11\n坏行\n")
+        self.assertEqual(caps.get(("【我推的孩子】", 1)), 11)
+        self.assertEqual(caps.get(("【我推的孩子】", 2)), 13)
+        self.assertEqual(caps.get(("【我推的孩子】", 3)), 11)
+
+    def test_absolute_numbering_with_overridden_caps(self):
+        from anime115.anime_jobs import _absolute_season
+        caps = {("【我推的孩子】", 1): 11, ("【我推的孩子】", 2): 13, ("【我推的孩子】", 3): 11}
+        self.assertEqual(_absolute_season("【我推的孩子】", 34, caps), (3, 10))
+        self.assertEqual(_absolute_season("【我推的孩子】", 12, caps), (2, 1))
+        self.assertEqual(_absolute_season("【我推的孩子】", 5, caps), (1, 5))
+
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
         cases = [

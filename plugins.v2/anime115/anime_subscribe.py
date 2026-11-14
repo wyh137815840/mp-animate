@@ -195,3 +195,34 @@ def _positive_int(value) -> int | None:
 def _season(value) -> int | None:
     number = _positive_int(value)
     return number
+
+
+def parse_cap_overrides(text: str) -> dict:
+    """手动写的每季集数上限。
+
+    每行一部，形如「剧名=1:11,2:13,3:11」。有些番在 TMDB 上被压成一季
+    （比如《我推的孩子》是单季 35 集），订阅里的上限会挡住跨季连号换算，
+    这时用它纠正。优先于 MoviePilot 订阅里的值。
+    """
+    result = {}
+    for line in str(text or "").splitlines():
+        row = line.strip()
+        if not row or "=" not in row:
+            continue
+        name, _, tail = row.partition("=")
+        show = name.strip()
+        if not show:
+            continue
+        for chunk in tail.split(","):
+            piece = chunk.strip()
+            if not piece or ":" not in piece:
+                continue
+            season_text, _, size_text = piece.partition(":")
+            try:
+                season = int(season_text)
+                size = int(size_text)
+            except ValueError:
+                continue
+            if season > 0 and size > 0:
+                result[(show, season)] = size
+    return result

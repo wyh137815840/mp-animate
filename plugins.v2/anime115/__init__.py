@@ -47,7 +47,7 @@ from .anime_jobs import (
     run_strm as write_library_strm,
 )
 from .anime_names import Show, _fold_name, norm, parse_watchlist
-from .anime_subscribe import load_mp_subscriptions, shows_from_subscriptions
+from .anime_subscribe import parse_cap_overrides, load_mp_subscriptions, shows_from_subscriptions
 from .anime_tmdb import live_bounds, shanghai_today
 
 # 剧名搜到的候选少于这个数时，用别名再搜一遍补齐。
@@ -73,7 +73,7 @@ class Anime115(_PluginBase):
     plugin_name = "动漫 115"
     plugin_desc = "从动漫花园补连载磁力，用已登录的 115 离线，并在安全时摊平整包。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.78"
+    plugin_version = "1.0.79"
     plugin_author = "local"
     author_url = "https://github.com/wyh137815840/mp-animate"
     plugin_config_prefix = "anime115_"
@@ -96,6 +96,7 @@ class Anime115(_PluginBase):
     _watchlist = ""
     _subscribe_source = "mp"
     _fansub_prefer = ""
+    _season_cap_overrides = ""
     _resolution = "1080"
     _require_sub = True
     _allow_batch = False
@@ -156,6 +157,7 @@ class Anime115(_PluginBase):
         self._watchlist = str(config.get("watchlist") or "")
         self._subscribe_source = _subscribe_source(config.get("subscribe_source"))
         self._fansub_prefer = str(config.get("fansub_prefer") or "")
+        self._season_cap_overrides = str(config.get("season_cap_overrides") or "")
         self._resolution = str(config.get("resolution") or "1080").strip() or "1080"
         self._require_sub = bool(config.get("require_sub", True))
         self._allow_batch = bool(config.get("allow_batch"))
@@ -306,6 +308,7 @@ class Anime115(_PluginBase):
                             _field(6, "fansub_prefer", "优先字幕组", "多个用逗号"),
                             _field(6, "subscribe_source", "订阅来源", "mp=从 MP 订阅读取，watchlist=只读追更框，both=两边"),
                             _area("watchlist", "追更，每行一部", "来源不是 mp 时才用。剧名 | 别名 | group=字幕组 | tmdb_id=编号 | 连载中"),
+                            _area("season_cap_overrides", "每季集数覆盖，每行一部", "剧名=1:11,2:13,3:11。MoviePilot 订阅里把多季压成一季时用它纠正，优先于订阅值"),
                             _field(6, "tmdb_api_key", "TMDB API Key", "v3 密钥，留空则用 MoviePilot 的 TMDB_API_KEY", secret=True),
                             _area("flatten_roots", "摊平目录，每行一个", "/离线下载/动漫"),
                             _field(3, "min_episode_mb", "最小体积(MB)", "80"),
@@ -822,7 +825,12 @@ class Anime115(_PluginBase):
             total = _as_int(row.get("total_episode"), 0)
             if name and season > 0 and total > 0:
                 caps[(name, season)] = total
+        caps.update(self._cap_overrides())
         return caps
+
+    def _cap_overrides(self) -> dict:
+        """手动写的每季集数上限，优先于 MoviePilot 订阅里的值。"""
+        return parse_cap_overrides(self._season_cap_overrides)
 
     def _config(self) -> JobConfig:
         prefer = [item.strip() for item in self._fansub_prefer.split(",") if item.strip()]
