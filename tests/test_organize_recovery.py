@@ -422,6 +422,8 @@ class RecoveryTest(unittest.TestCase):
 
             def list_dir(self, path, **kwargs):
                 self.calls += 1
+                if path.endswith("测试剧 (2024)"):
+                    return [Item("Season 01", True)]
                 if path.endswith("Season 01"):
                     return [Item("[压制组] 测试剧 [01-12] 合集", True),
                             Item("S01E03 - 测试剧 - 03.mkv")]
