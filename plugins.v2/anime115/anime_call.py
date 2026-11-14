@@ -17,6 +17,9 @@ STORAGE_TIMEOUT = 60
 OFFLINE_TIMEOUT = 45
 # 一轮任务的总预算（秒）。超过就干净收尾，不让这一轮压住下一个周期。
 ROUND_BUDGET = 900
+# 每日补磁力一轮的预算：订阅变多后候选池翻倍，扫完还要逐个提交离线任务，
+# 900 秒只够提交个位数。整理轮仍用 ROUND_BUDGET。
+DAILY_ROUND_BUDGET = 1800
 
 
 class Stopped(Exception):

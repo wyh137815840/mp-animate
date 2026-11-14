@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import functools
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .anime_call import (
+    DAILY_ROUND_BUDGET,
     OFFLINE_TIMEOUT,
     ROUND_BUDGET,
     STORAGE_TIMEOUT,
@@ -311,6 +314,25 @@ def _fair_order(picks: list) -> list:
             return ordered
 
 
+# 同一时刻只跑一个作业：整理、每日补集、摊平都会动 115，重叠会互相干扰。
+_JOB_LOCK = threading.Lock()
+
+
+def _single_job(func):
+    """已经有作业在跑时，这一轮直接跳过，不排队。"""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        if not _JOB_LOCK.acquire(blocking=False):
+            _job_log(f"动漫 115 已有作业在跑，{func.__name__} 这一轮跳过", "warning")
+            return {"ok": False, "error": "已有作业在跑", "counts": {}, "moved": 0, "submitted": 0}
+        try:
+            return func(*args, **kwargs)
+        finally:
+            _JOB_LOCK.release()
+    return wrapper
+
+
+@_single_job
 def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig, report=None,
               owned_session=None, fallback_session=None) -> dict:
     """搜索并在非预览时提交离线。预览不写 seen。
@@ -437,7 +459,7 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
             break
         if index % 5 == 0 and _system_stopped():
             return _daily_stopped(config, inbox, chosen, notes, submitted)
-        if index % 5 == 0 and budget_exceeded(started, ROUND_BUDGET):
+        if index % 5 == 0 and budget_exceeded(started, DAILY_ROUND_BUDGET):
             _job_log("动漫 115 每日任务超过时间预算，先收尾，下一轮继续", "warning")
             notes.append({"show": "", "title": "", "reason": "本轮超过时间预算，剩下的留到下一轮"})
             break
@@ -480,6 +502,7 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
     }
 
 
+@_single_job
 def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> dict:
     """整理本插件提交过的任务。
 
@@ -710,6 +733,7 @@ def _organize_one(task, session, library, config, moves, offline=None, round_dea
     _remember_strm(task, decision)
 
 
+@_single_job
 def run_strm(session, config: JobConfig, limit: str = "", report=None) -> dict:
     """给库里已经整理好的视频补 strm。不移动 115 上的文件，也不写 nfo。"""
     library = strip_mount_prefix(config.library_root, config.mount_prefix) if config.library_root else ""
@@ -787,6 +811,7 @@ def run_strm(session, config: JobConfig, limit: str = "", report=None) -> dict:
     return payload
 
 
+@_single_job
 def run_flatten(session, config: JobConfig, report=None) -> dict:
     """先分类。安全移动为 0，或预览、或没开摊平落盘时，不移动。"""
     roots = [strip_mount_prefix(item, config.mount_prefix) for item in config.flatten_roots if str(item).strip()]
@@ -2858,6 +2883,7 @@ def _library_videos(session, library: str, limit: str) -> list[dict]:
     return rows
 
 
+@_single_job
 def run_split(session, config: JobConfig, limit: str = "", report=None) -> dict:
     """把库里放错位置的整包拆开：季目录里再套一层的包，拆成一集一集。
 

@@ -1,6 +1,7 @@
 """大包整理回归：只搬本集字幕，花絮不得当正片。"""
 import sys
 import types
+import threading
 import unittest
 from pathlib import Path
 
@@ -345,6 +346,26 @@ class RecoveryTest(unittest.TestCase):
             "S02E14 - [DBD-Raws][Oshi no Ko S2][PV][14][1080P][BDRip][HEVC-10bit][FLAC].mkv"))
         # 片名后面自带的内容不算花絮
         self.assertFalse(_is_extra_video("[Group][The Sealed Sword Frenzy][PV].mkv"))
+
+    def test_jobs_do_not_overlap(self):
+        from anime115 import anime_jobs
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow(*args, **kwargs):
+            started.set()
+            release.wait(5)
+            return {"ok": True}
+
+        with anime_jobs._JOB_LOCK:
+            result = anime_jobs._single_job(slow)()
+            self.assertFalse(result.get("ok"))
+            self.assertIn("作业", result.get("error", ""))
+        release.set()
+
+    def test_daily_budget_is_larger_than_round_budget(self):
+        from anime115.anime_call import DAILY_ROUND_BUDGET, ROUND_BUDGET
+        self.assertGreater(DAILY_ROUND_BUDGET, ROUND_BUDGET)
 
     def test_extra_detection_on_real_release_names(self):
         from anime115.anime_jobs import _is_extra_video
