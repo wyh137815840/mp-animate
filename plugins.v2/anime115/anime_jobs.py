@@ -56,6 +56,10 @@ _NESTED_PROBE_LIMIT = 20
 # 探目录的总时限。115 慢的时候一次列目录要 8-10 秒，探满 20 个会吃掉整条任务的预算；
 # 115 快时次数上限仍然生效。
 _NESTED_PROBE_SECONDS = 60
+# 「查库里已有」这一阶段的时限（秒）。它要列库根、剧目录、季目录和季下的包子目录，
+# 115 慢的时候一次列目录 5-10 秒，几百次就能吃掉半小时，后面真正要提交的集
+# 反而没时间提交。超时就按「查不到」放行（宁可多下一个已有的集）。
+_OWNED_CHECK_BUDGET = 300
 
 
 class JobStopped(Stopped):
@@ -347,7 +351,14 @@ def run_daily(shows, session, entries_of, seen, now: datetime, config: JobConfig
     inbox = _dated_inbox(config, now)
     started = time.monotonic()
     picks, notes = select_shows(shows, entries_of, config.search, now)
-    owned = _OwnedIndex(owned_session or session, config) if config.skip_owned else None
+    # 「查库里已有」要列很多目录，115 慢时能吃掉几十分钟。这一段单独给时限，
+    # 超了就按「查不到」放行：宁可多下一个已有的集，也不要把整轮拖死。
+    owned_deadline = time.monotonic() + _OWNED_CHECK_BUDGET
+    owned = (
+        _OwnedIndex(owned_session or session, config, deadline=owned_deadline)
+        if config.skip_owned
+        else None
+    )
     chosen = []
     checked = 0
     scan_limit = max(config.max_submit_per_run * 3, 5)
@@ -1292,9 +1303,15 @@ def _show_folder(session, library: str, show: str, deadline: float = None) -> tu
 
 
 class _OwnedIndex:
-    """查库根里是不是已经有这一集。只读；出错或认不准时放行（返回 None），不挡提交。"""
+    """查库根里是不是已经有这一集。只读；出错或认不准时放行（返回 None），不挡提交。
 
-    def __init__(self, session, config):
+    这一步会列很多目录：库根、每部剧的目录、季目录，以及季目录下的包子目录。
+    115 慢的时候一次列目录要 5-10 秒，整轮下来能吃掉几十分钟，拖住后面的提交。
+    所以这里自带一个总时限：超时的目录按「查不到」处理（放行，不挡提交），
+    并记住已经放弃，后面的剧不再重复探同一个目录。
+    """
+
+    def __init__(self, session, config, deadline: float | None = None):
         self.session = session
         self.config = config
         self.library = (
@@ -1302,9 +1319,26 @@ class _OwnedIndex:
         )
         self._folders: list[str] | None = None
         self._episodes: dict[tuple[str, int], set[int] | None] = {}
+        # 这一阶段的时限。给了就按它算，没给就不限（单次调用仍有 60 秒兜底）。
+        self._deadline = deadline
+        self._gave_up = False
+
+    def _expired(self) -> bool:
+        if getattr(self, "_gave_up", False):
+            return True
+        deadline = getattr(self, "_deadline", None)
+        if deadline is None:
+            return False
+        if time.monotonic() >= deadline:
+            self._gave_up = True
+            _job_log("动漫 115 查库里已有超时，这一轮剩下的按没有处理", "warning")
+            return True
+        return False
 
     def has(self, pick) -> bool | None:
         """True=库里已有；False=没有；None=查不了（没有库根、目录不全、接口失败）。"""
+        if self._expired():
+            return None
         try:
             return self._has(pick)
         except Exception:
@@ -1415,6 +1449,8 @@ class _OwnedIndex:
             return set()
         episodes: set[int] = set()
         for season_dir in season_dirs:
+            if self._expired():
+                return None
             try:
                 files = _list_dir(self.session, season_dir.path)
             except JobStopped:
@@ -1426,6 +1462,8 @@ class _OwnedIndex:
             for item in files:
                 if not getattr(item, "is_dir", False):
                     continue
+                if self._expired():
+                    return None
                 try:
                     files.extend(_list_dir(self.session, item.path))
                 except JobStopped:

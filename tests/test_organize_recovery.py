@@ -483,6 +483,48 @@ class RecoveryTest(unittest.TestCase):
         from anime115.anime_subs import subtitle_relative
         self.assertEqual(subtitle_relative('Show/S01E01.strm', 'Show.TC.ass'), 'Show/S01E01.zh-TW.ass')
 
+    def test_owned_index_gives_up_after_its_budget(self):
+        """查库里已有超时就放行：不能因为 115 慢把整轮拖死。"""
+        import time as _time
+        from anime115.anime_jobs import _OwnedIndex
+
+        class Pick:
+            show = "测试剧"
+            season = 1
+            episode = 1
+            pack = None
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def list_dir(self, path, **kwargs):
+                self.calls += 1
+                return []
+
+        index = _OwnedIndex.__new__(_OwnedIndex)
+        index.session = Session()
+        index.config = type("C", (), {"season_caps": {}})()
+        index.library = "/动漫"
+        index._folders = ["测试剧 (2024)"]
+        index._episodes = {}
+        index._deadline = _time.monotonic() - 1  # 已经超时
+        index._gave_up = False
+        # 超时后直接放行（None=查不了，按没有处理），不再去列目录
+        self.assertIsNone(index.has(Pick()))
+        self.assertEqual(index.session.calls, 0)
+        self.assertTrue(index._gave_up)
+
+    def test_owned_index_budget_is_set_in_daily(self):
+        """每日任务要给「查库里已有」单独划一段时限。"""
+        import inspect
+        from anime115 import anime_jobs
+
+        source = inspect.getsource(anime_jobs.run_daily)
+        self.assertIn("_OWNED_CHECK_BUDGET", source)
+        self.assertIn("deadline=owned_deadline", source)
+        self.assertGreater(anime_jobs._OWNED_CHECK_BUDGET, 0)
+
     def test_budget_is_bounded_and_scales(self):
         cfg = JobConfig()
         self.assertGreater(_move_budget(cfg, 72), _move_budget(cfg, 1))
