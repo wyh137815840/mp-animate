@@ -646,6 +646,70 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(decision.get("reason"), "collision")
         self.assertNotEqual(task.get("status"), "moved")
 
+    def test_no_video_lets_the_episode_be_searched_again(self):
+        """空壳包（empty_pack）时，这一集要能换源重找，不能卡住三天。"""
+        import datetime
+        from anime115.anime_jobs import _episode_blocked
+
+        class Torrent:
+            infohash = "newhash"
+
+        class Pick:
+            torrent = Torrent()
+            show = "测试剧"
+            season = 1
+            episode = 1
+            pack = None
+
+        seen = {"hashes": {"oldhash": {"status": "empty_pack",
+                                       "at": "2026-11-10T00:00:00+08:00",
+                                       "show": "测试剧", "season": 1, "episode": 1}},
+                "episodes": {"测试剧|1|1": "oldhash"}}
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+        self.assertFalse(_episode_blocked(seen, Pick(), now))
+
+    def test_no_video_still_waits_three_days(self):
+        """包里确实没有正片的，仍按原规则等三天，避免反复投同一个集。"""
+        import datetime
+        from anime115.anime_jobs import _episode_blocked
+
+        class Torrent:
+            infohash = "newhash"
+
+        class Pick:
+            torrent = Torrent()
+            show = "测试剧"
+            season = 1
+            episode = 1
+            pack = None
+
+        seen = {"hashes": {"oldhash": {"status": "no_video",
+                                       "at": "2026-11-15T00:00:00+08:00",
+                                       "show": "测试剧", "season": 1, "episode": 1}},
+                "episodes": {"测试剧|1|1": "oldhash"}}
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+        self.assertTrue(_episode_blocked(seen, Pick(), now))
+
+    def test_the_same_failed_magnet_is_not_submitted_twice(self):
+        """换源可以重试，但同一个死 magnet 不能再提交一次。"""
+        import datetime
+        from anime115.anime_jobs import _episode_blocked
+
+        class Torrent:
+            infohash = "oldhash"
+
+        class Pick:
+            torrent = Torrent()
+            show = "测试剧"
+            season = 1
+            episode = 1
+            pack = None
+
+        seen = {"hashes": {"oldhash": {"status": "no_video", "at": "2026-11-10T00:00:00+08:00",
+                                       "show": "测试剧", "season": 1, "episode": 1}},
+                "episodes": {"测试剧|1|1": "oldhash"}}
+        self.assertTrue(_episode_blocked(seen, Pick(), datetime.datetime.now()))
+
     def test_budget_is_bounded_and_scales(self):
         cfg = JobConfig()
         self.assertGreater(_move_budget(cfg, 72), _move_budget(cfg, 1))

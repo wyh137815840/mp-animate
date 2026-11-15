@@ -551,6 +551,10 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
             continue
         if task.get("status") in _ORGANIZE_DEAD:
             continue
+        if task.get("status") in _ORGANIZE_EMPTY:
+            # 空壳包再扫也是空，不再进队列；但 seen 里的状态留着，
+            # 下一轮 daily 会给这一集换个源重新找。
+            continue
         infohash = str(task.get("infohash") or "").lower()
         if not infohash:
             continue
@@ -643,6 +647,15 @@ def _organize_one(task, session, library, config, moves, offline=None, round_dea
         return
     decision = _decide_move(task, files, library, pack, config.season_caps)
     decision["pack"] = pack
+    if (decision.get("reason") == "没有视频" and confirmed and not files):
+        # 包确实在（收件箱里列出来了），但里面一个文件都没有：
+        # 115 下载失败留下的空壳，种子失效。正片压根没下来，
+        # 这一集要能换个源重找，所以单独一种状态。
+        decision["reason"] = "包是空的"
+    if decision.get("reason") == "包是空的" and offline and not _task_finished(offline):
+        # 115 那边还没下完，现在看到的是还没长出文件的目录。
+        # 这种不能算空壳，等下一轮再来。
+        decision["reason"] = "还没有文件"
     if decision.get("action") != "move":
         # 记下这一条为什么没搬成，汇报时能区分「包没落地」和「真的卡住」。
         task["organize_reason"] = str(decision.get("reason") or decision.get("error") or "")
@@ -982,9 +995,10 @@ def _episode_blocked(seen: dict, pick: Pick, now: datetime) -> bool:
     previous = hashes.get(episodes.get(key, ""), {})
     if not previous:
         return False
-    if previous.get("status") in ("failed", "no_pack"):
-        # failed 是提交没成功，no_pack 是这一包在 115 上已经没了。
-        # 两种都要允许换个源再找一次。
+    if previous.get("status") in ("failed", "no_pack", "empty_pack"):
+        # failed 是提交没成功；no_pack 是这一包在 115 上已经没了；
+        # empty_pack 是包在，但里面是空的（种子失效，下载没成功）。
+        # 三种都没拿到正片，要允许换个源再找一次。
         return False
     span = getattr(pick, "pack", None) or None
     if span and int(span[1]) > int(span[0]):
@@ -1207,8 +1221,12 @@ def _plain_int(value) -> int | None:
 # no_pack 是确认这一包在 115 上已经不存在（离线记录没了、收件箱里也找不到）。
 # 这种是死账：磁力失效被 115 清掉了，再扫多少轮也找不回来。单独记一种状态，
 # 免得它们一直占着待整理队列、每轮白扫一遍收件箱。
+# empty_pack 是包在、但里面是空的（115 下载失败留下的空壳）。正片没下来，
+# 这一集还得找别的源，所以不算处理完，还要写回 seen 让下一轮换源重试。
 _ORGANIZE_DONE = {"moved", "no_video"}
 _ORGANIZE_DEAD = {"no_pack"}
+_ORGANIZE_EMPTY = {"empty_pack"}
+_ORGANIZE_FINISHED = _ORGANIZE_DONE | _ORGANIZE_DEAD | _ORGANIZE_EMPTY
 
 
 def _include_seen(tasks, seen) -> None:
@@ -1228,6 +1246,10 @@ def _include_seen(tasks, seen) -> None:
         if not key or key in known or not isinstance(row, dict):
             continue
         if row.get("status") in _ORGANIZE_DONE:
+            continue
+        if row.get("status") in _ORGANIZE_EMPTY:
+            # 空壳包不再拉回整理队列（扫了也是空），
+            # 但 seen 里的这个状态要留着：daily 会看到它，给这一集换源重找。
             continue
         folder = str(row.get("folder") or "").strip()
         if not folder:
@@ -1256,7 +1278,7 @@ def _sync_seen_status(tasks, seen) -> bool:
         if not isinstance(task, dict):
             continue
         status = task.get("status")
-        if status not in _ORGANIZE_DONE and status not in _ORGANIZE_DEAD:
+        if status not in _ORGANIZE_FINISHED:
             continue
         row = hashes.get(str(task.get("infohash") or "").lower())
         if isinstance(row, dict) and row.get("status") != status:
@@ -1605,7 +1627,16 @@ def _close_empty_leftover(task: dict, decision: dict, confirmed: bool, config: J
     """
     if config.dry_run or not confirmed:
         return
-    if decision.get("action") != "leave" or decision.get("reason") != "没有视频":
+    if decision.get("action") != "leave":
+        return
+    reason = decision.get("reason")
+    if reason == "包是空的":
+        # 115 下载失败留下的空壳：一个文件都没有，正片压根没下来。
+        # 单独一种状态：这一集要能换个源重找，不能当成「这一集处理过了」。
+        task["status"] = "empty_pack"
+        task["reason"] = "包是空的"
+        return
+    if reason != "没有视频":
         return
     task["status"] = "no_video"
     task["reason"] = "没有视频"

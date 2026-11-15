@@ -1445,7 +1445,7 @@ class ImportTest(unittest.TestCase):
         plugin = importlib.util.module_from_spec(spec)
         sys.modules["app.plugins.anime115"] = plugin
         spec.loader.exec_module(plugin)
-        self.assertEqual(plugin.Anime115.plugin_version, "1.0.85")
+        self.assertEqual(plugin.Anime115.plugin_version, "1.0.86")
         self.assertIs(sys.modules["anime_dmhy"], stale)
         self.assertIsNot(plugin.parse_rss, getattr(stale, "parse_rss", None))
         for name in ("anime_names", "anime_jobs", "anime_flatten", "anime_tmdb", "anime_config", "anime_pan", "anime_progress", "anime_strm", "anime_subscribe", "anime_playurl"):
@@ -1799,10 +1799,13 @@ class ClosedLoopTest(unittest.TestCase):
         self.assertNotIn("strm_error", result)
         self.assertEqual(len(result["moves"]), count)
         self.assertEqual(session.moves, [])
-        self.assertTrue(all(item["action"] == "leave" and item["reason"] == "没有视频" for item in result["moves"]))
+        # 真空壳（一个文件都没有）算 empty_pack：有字幕但没正片的仍算 no_video。
+        self.assertTrue(all(item["action"] == "leave" and item["reason"] in ("没有视频", "包是空的")
+                        for item in result["moves"]))
         self.assertTrue(all("建不了目标目录" not in (item.get("error") or item["reason"]) for item in result["moves"]))
-        self.assertTrue(all(task["status"] == "no_video" and task["reason"] == "没有视频" for task in tasks))
-        self.assertTrue(all(row["status"] == "no_video" for row in seen["hashes"].values()))
+        self.assertTrue(all(task["status"] in ("no_video", "empty_pack") and
+                            task["reason"] in ("没有视频", "包是空的") for task in tasks))
+        self.assertTrue(all(row["status"] in ("no_video", "empty_pack") for row in seen["hashes"].values()))
         self.assertNotIn("moved", {row["status"] for row in seen["hashes"].values()})
         session.listed.clear()
         again = run_organize(tasks, session, JobConfig(dry_run=False, library_root="/动漫"), seen=seen)
@@ -1810,7 +1813,7 @@ class ClosedLoopTest(unittest.TestCase):
         self.assertEqual(again["moves"], [])
         self.assertEqual(session.moves, [])
         self.assertEqual(session.listed, [])
-        self.assertTrue(all(task["status"] == "no_video" for task in tasks))
+        self.assertTrue(all(task["status"] in ("no_video", "empty_pack") for task in tasks))
 
     def test_unconfirmed_missing_video_stays_pending(self):
         day = "/离线下载/动漫/20261110"
