@@ -579,6 +579,73 @@ class RecoveryTest(unittest.TestCase):
         source = inspect.getsource(anime_jobs.run_organize)
         self.assertIn("_ORGANIZE_DEAD", source)
 
+    def test_collision_writes_the_missing_strm_instead_of_waiting_forever(self):
+        """文件已在 115 目标目录、只是 strm 没写出来时，要补写 strm 并算入库。
+
+        2026-11-15 查到 Re:Zero E83-85 就是这样：115 上有文件，本地 strm 没有，
+        插件每轮都判 collision 跳过，这一集永远补不进来。
+        """
+        from anime115.anime_jobs import _finish_existing
+
+        class Item:
+            def __init__(self, name, pickcode="pc123"):
+                self.name = name
+                self.path = "/动漫/测试剧 (2016)/Season 01/" + name
+                self.is_dir = False
+                self.size = 100
+                self.raw = {"pc": pickcode}
+
+        class Session:
+            def __init__(self):
+                self.cancel = None
+
+            def list_dir(self, path, **kwargs):
+                return [Item("Show - 85.mkv")]
+
+        task = {"infohash": "h" * 40, "show": "测试剧", "season": 1, "episode": 85}
+        decision = {"action": "move", "reason": "ok", "task": task["infohash"],
+                    "dest_dir": "/动漫/测试剧 (2016)/Season 01",
+                    "name": "Show - 85.mkv", "season": 1, "episode": 85, "nodes": []}
+        moves = []
+        written = {}
+
+        def fake_apply_strm(dec, cfg, write, cancel=None):
+            dec["strm"] = "/strm/Show - S01E85 - Show - 85.strm"
+
+        import anime115.anime_jobs as jobs
+        original = jobs._apply_strm
+        jobs._apply_strm = fake_apply_strm
+        try:
+            _finish_existing(Session(), task, decision, JobConfig(dry_run=False), moves,
+                             write_strm=True)
+        finally:
+            jobs._apply_strm = original
+
+        self.assertEqual(task.get("status"), "moved")
+        self.assertEqual(decision.get("action"), "move")
+        self.assertEqual(decision.get("reason"), "补写 strm")
+        self.assertEqual(len(moves), 1)
+
+    def test_collision_without_the_file_stays_a_collision(self):
+        """目标目录里真的没有那个文件时，还是老实地报 collision。"""
+        from anime115.anime_jobs import _finish_existing
+
+        class Session:
+            cancel = None
+
+            def list_dir(self, path, **kwargs):
+                return []
+
+        task = {"infohash": "h" * 40, "show": "测试剧", "season": 1, "episode": 85}
+        decision = {"action": "move", "reason": "ok", "task": task["infohash"],
+                    "dest_dir": "/动漫/测试剧 (2016)/Season 01",
+                    "name": "Show - 85.mkv", "season": 1, "episode": 85, "nodes": []}
+        moves = []
+        _finish_existing(Session(), task, decision, JobConfig(dry_run=False), moves,
+                         write_strm=True)
+        self.assertEqual(decision.get("reason"), "collision")
+        self.assertNotEqual(task.get("status"), "moved")
+
     def test_budget_is_bounded_and_scales(self):
         cfg = JobConfig()
         self.assertGreater(_move_budget(cfg, 72), _move_budget(cfg, 1))

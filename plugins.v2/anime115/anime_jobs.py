@@ -732,8 +732,9 @@ def _organize_one(task, session, library, config, moves, offline=None, round_dea
         task["status"] = "moved"
         return
     if decision["name"] in existing:
-        decision["action"] = "leave"
-        decision["reason"] = "collision"
+        # 文件已经在 115 的目标目录里了，但 strm 还没写出来（上一轮搬完没写成，
+        # 或者本地 strm 被清过）。这时不要再搬一次（会撞名），只补 strm。
+        _finish_existing(session, task, decision, config, moves, write_strm=True)
         return
     for item in decision["nodes"]:
         try:
@@ -2784,6 +2785,53 @@ def _decide_move(task: dict, files: list[Node], library: str, pack_name: str = "
 
 
 _SEASON_DIR = re.compile(r"^season\s*(\d{1,2})$", re.IGNORECASE)
+
+
+def _finish_existing(session, task: dict, decision: dict, config: JobConfig, moves: list,
+                     write_strm: bool = False) -> None:
+    """文件已经在 115 的目标目录里了，但本地还没这一集的 strm。
+
+    这种情况是搬过了、strm 没写出来（写失败被清掉，或者本地 strm 被重建过）。
+    再搬一次会撞名，所以只补 strm：strm 指向已经在库里的那个文件，
+    补上就把这一集算入库了。
+    """
+    dest_dir = decision.get("dest_dir") or ""
+    name = decision.get("name") or ""
+    nodes = []
+    if dest_dir and name:
+        try:
+            for item in _list_dir(session, dest_dir):
+                if item.name == name and not item.is_dir:
+                    nodes.append(item)
+        except Exception:
+            nodes = []
+    if not nodes:
+        decision["action"] = "leave"
+        decision["reason"] = "collision"
+        return
+    # 用库里的那个文件来写 strm：pickcode 要指向真正在库里的那个。
+    decision["nodes"] = nodes
+    _apply_strm(decision, config, write=write_strm,
+                cancel=getattr(session, "cancel", None))
+    if decision.get("strm"):
+        decision["action"] = "move"
+        decision["reason"] = "补写 strm"
+        task["status"] = "moved"
+        _remember_strm(task, decision)
+        moves.append(decision)
+        return
+    if decision.get("strm_error"):
+        # strm 没写成：记下来，下一轮接着补。
+        decision["action"] = "leave"
+        decision["reason"] = "补写 strm 失败"
+        task["strm_status"] = "failed"
+        task["strm_relative"] = decision.get("strm_relative") or ""
+        task["strm_url"] = decision.get("strm_url") or ""
+        moves.append(decision)
+        return
+    decision["action"] = "leave"
+    decision["reason"] = "collision"
+    moves.append(decision)
 
 
 def _apply_strm(decision: dict, config: JobConfig, write: bool, cancel=None) -> None:
