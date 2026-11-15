@@ -549,6 +549,8 @@ def run_organize(tasks, session, config: JobConfig, report=None, seen=None) -> d
     for task in tasks:
         if not isinstance(task, dict) or task.get("status") in _ORGANIZE_DONE:
             continue
+        if task.get("status") in _ORGANIZE_DEAD:
+            continue
         infohash = str(task.get("infohash") or "").lower()
         if not infohash:
             continue
@@ -630,6 +632,13 @@ def _organize_one(task, session, library, config, moves, offline=None, round_dea
     if why:
         task["organize_reason"] = why
         task["organize_checked_at"] = time.time()
+        if _pack_never_landed(task, offline, why):
+            task["status"] = "no_pack"
+            _job_log(
+                "动漫 115 这一包在 115 上已经没有了，不再整理："
+                f"{task.get('title') or task.get('show') or task.get('infohash') or ''}",
+                "warning",
+            )
         moves.append({"action": "leave", "reason": why, "task": task.get("infohash"), "nodes": [], "pack": pack})
         return
     decision = _decide_move(task, files, library, pack, config.season_caps)
@@ -972,7 +981,9 @@ def _episode_blocked(seen: dict, pick: Pick, now: datetime) -> bool:
     previous = hashes.get(episodes.get(key, ""), {})
     if not previous:
         return False
-    if previous.get("status") == "failed":
+    if previous.get("status") in ("failed", "no_pack"):
+        # failed 是提交没成功，no_pack 是这一包在 115 上已经没了。
+        # 两种都要允许换个源再找一次。
         return False
     span = getattr(pick, "pack", None) or None
     if span and int(span[1]) > int(span[0]):
@@ -1192,7 +1203,11 @@ def _plain_int(value) -> int | None:
 
 
 # moved 是已经入库。no_video 是确认这一包里没有视频。两条都不再扫。
+# no_pack 是确认这一包在 115 上已经不存在（离线记录没了、收件箱里也找不到）。
+# 这种是死账：磁力失效被 115 清掉了，再扫多少轮也找不回来。单独记一种状态，
+# 免得它们一直占着待整理队列、每轮白扫一遍收件箱。
 _ORGANIZE_DONE = {"moved", "no_video"}
+_ORGANIZE_DEAD = {"no_pack"}
 
 
 def _include_seen(tasks, seen) -> None:
@@ -1240,7 +1255,7 @@ def _sync_seen_status(tasks, seen) -> bool:
         if not isinstance(task, dict):
             continue
         status = task.get("status")
-        if status not in _ORGANIZE_DONE:
+        if status not in _ORGANIZE_DONE and status not in _ORGANIZE_DEAD:
             continue
         row = hashes.get(str(task.get("infohash") or "").lower())
         if isinstance(row, dict) and row.get("status") != status:
@@ -1553,6 +1568,33 @@ def _scope_to_pack(session, task: dict, offline: dict, deadline: float = None) -
     label = wanted[0] if wanted else (task.get("show") or task.get("infohash") or "")
     listed = "、".join(item.name for item in dirs[:8])
     return [], "", f"找不到这一包：{label}；现有 {listed}", False
+
+
+# 找不到包要连续几轮都找不到，才算「这个包真的没了」。
+# 一次两次找不到，可能是 115 刚下载完还没落到收件箱，或者收件箱正在整理。
+_PACK_MISS_LIMIT = 3
+
+
+def _pack_never_landed(task: dict, offline: dict, why: str) -> bool:
+    """这一包在 115 上是不是真的已经没有了。
+
+    三个条件同时成立才算死账：
+    1. 115 的离线列表里已经没有这条记录了（磁力被清掉、或者早已过期）；
+    2. 收件箱里按名字也找不到它（不是「挪到别处了」）；
+    3. 已经连续好几轮都找不到（不是这一轮的抖动）。
+
+    判死之后就不再每轮重扫收件箱了。这种包不会自己回来。
+    """
+    if not str(why or "").startswith("找不到这一包"):
+        return False
+    if offline:
+        # 离线列表里还有这条记录（哪怕是失败状态），说明 115 还认它，不算死账。
+        return False
+    misses = int(task.get("pack_miss_count") or 0) + 1
+    task["pack_miss_count"] = misses
+    if misses < _PACK_MISS_LIMIT:
+        return False
+    return True
 
 
 def _close_empty_leftover(task: dict, decision: dict, confirmed: bool, config: JobConfig) -> None:

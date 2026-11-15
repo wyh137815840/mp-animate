@@ -525,6 +525,60 @@ class RecoveryTest(unittest.TestCase):
         self.assertIn("deadline=owned_deadline", source)
         self.assertGreater(anime_jobs._OWNED_CHECK_BUDGET, 0)
 
+    def test_pack_never_landed_needs_three_misses_and_no_offline_record(self):
+        """包在 115 上彻底没了：离线列表里没有 + 连续几轮找不到，才算死账。"""
+        from anime115.anime_jobs import _pack_never_landed
+
+        task = {}
+        why = "找不到这一包：某剧 S01E01；现有 别的包"
+        # 离线列表里还有这条记录 -> 不算死账（可能还在下载）
+        self.assertFalse(_pack_never_landed(task, {"status": 1}, why))
+        # 第一次找不到 -> 还没到门槛
+        self.assertFalse(_pack_never_landed(task, {}, why))
+        self.assertEqual(task.get("pack_miss_count"), 1)
+        # 第二次 -> 还是没到门槛
+        self.assertFalse(_pack_never_landed(task, {}, why))
+        # 第三次 -> 判死
+        self.assertTrue(_pack_never_landed(task, {}, why))
+        self.assertEqual(task.get("pack_miss_count"), 3)
+
+    def test_pack_never_landed_ignores_other_reasons(self):
+        """不是「找不到包」的其它原因不计入死账次数。"""
+        from anime115.anime_jobs import _pack_never_landed
+
+        task = {}
+        self.assertFalse(_pack_never_landed(task, {}, "集数对不上"))
+        self.assertFalse(_pack_never_landed(task, {}, "collision"))
+        self.assertNotIn("pack_miss_count", task)
+
+    def test_no_pack_lets_the_episode_be_searched_again(self):
+        """判死的包不该挡住这一集再找别的源。"""
+        from anime115.anime_jobs import _episode_blocked
+
+        class Torrent:
+            infohash = "deadhash"
+
+        class Pick:
+            torrent = Torrent()
+            show = "测试剧"
+            season = 1
+            episode = 1
+            pack = None
+
+        seen = {"hashes": {"oldhash": {"status": "no_pack", "at": "2026-11-01T00:00:00+08:00",
+                                       "show": "测试剧", "season": 1, "episode": 1}},
+                "episodes": {"测试剧|1|1": "oldhash"}}
+        import datetime
+        self.assertFalse(_episode_blocked(seen, Pick(), datetime.datetime.now()))
+
+    def test_organize_skips_tasks_already_marked_dead(self):
+        """已判死的任务不再进待整理队列。"""
+        import inspect
+        from anime115 import anime_jobs
+
+        source = inspect.getsource(anime_jobs.run_organize)
+        self.assertIn("_ORGANIZE_DEAD", source)
+
     def test_budget_is_bounded_and_scales(self):
         cfg = JobConfig()
         self.assertGreater(_move_budget(cfg, 72), _move_budget(cfg, 1))
